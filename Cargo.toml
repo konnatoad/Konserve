@@ -1,0 +1,9 @@
+[package]
+name = "kafkaRust"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+zip = "0.6"
+walkdir = "2.4"
+chrono = "0.4"
