@@ -259,7 +259,6 @@ fn restore_backup_gui(zip_path: &PathBuf) -> Result<(), String> {
         return Err("Invalid backup fingerprint.".into());
     }
 
-    // Restore all files
     for i in 0..archive.len() {
         let mut file = archive.by_index(i).unwrap();
         let name_in_zip = file.name();
@@ -271,7 +270,6 @@ fn restore_backup_gui(zip_path: &PathBuf) -> Result<(), String> {
         let zip_path = Path::new(name_in_zip);
         let first_component = zip_path.components().next();
 
-        // If it's a top-level file like "Untitled.veg"
         if zip_path.components().count() == 1 {
             if let Some(target) = path_map.get(name_in_zip) {
                 if let Some(parent) = target.parent() {
@@ -283,7 +281,6 @@ fn restore_backup_gui(zip_path: &PathBuf) -> Result<(), String> {
             continue;
         }
 
-        // Otherwise, it's part of a folder
         if let Some(first) = first_component {
             let root = first.as_os_str().to_string_lossy().to_string();
             if let Some(base_path) = path_map.get(&root) {
