@@ -67,17 +67,31 @@ impl eframe::App for GUIApp {
             ui.heading("VanManen Backup Tool");
             ui.separator();
 
-            if ui.button("Add Folders").clicked() {
-                if
-                    let Some(folders) = FileDialog::new()
-                        .set_title("Select folders to back up")
-                        .pick_folders()
-                {
-                    self.selected_folders.extend(folders);
-                    self.selected_folders.sort();
-                    self.selected_folders.dedup();
+            ui.horizontal(|ui| {
+                if ui.button("Add Folders").clicked() {
+                    if
+                        let Some(folders) = FileDialog::new()
+                            .set_title("Select folders to back up")
+                            .pick_folders()
+                    {
+                        self.selected_folders.extend(folders);
+                        self.selected_folders.sort();
+                        self.selected_folders.dedup();
+                    }
                 }
-            }
+
+                if ui.button("Add Files").clicked() {
+                    if
+                        let Some(files) = FileDialog::new()
+                            .set_title("Select files to back up")
+                            .pick_files()
+                    {
+                        self.selected_folders.extend(files);
+                        self.selected_folders.sort();
+                        self.selected_folders.dedup();
+                    }
+                }
+            });
 
             ui.add_space(4.0);
 
@@ -178,26 +192,32 @@ fn create_temp_backup_gui(folders: &[PathBuf], output_dir: &PathBuf) -> Result<P
     }
     zip.write_all(fingerprint.as_bytes()).unwrap();
 
-    for folder in folders {
-        let base_path = folder;
-        for entry in WalkDir::new(base_path).into_iter().filter_map(Result::ok) {
-            let path = entry.path();
-            let relative = match path.strip_prefix(base_path) {
-                Ok(r) => r,
-                Err(_) => {
-                    continue;
+    for path in folders {
+        if path.is_file() {
+            let filename = path.file_name().unwrap().to_string_lossy();
+            zip.start_file(filename, options).unwrap();
+            let mut f = File::open(path).unwrap();
+            io::copy(&mut f, &mut zip).unwrap();
+        } else if path.is_dir() {
+            for entry in WalkDir::new(path).into_iter().filter_map(Result::ok) {
+                let entry_path = entry.path();
+                let relative = match entry_path.strip_prefix(path) {
+                    Ok(r) => r,
+                    Err(_) => {
+                        continue;
+                    }
+                };
+
+                let zip_folder = path.file_name().unwrap();
+                let final_path = Path::new(zip_folder).join(relative);
+
+                if entry_path.is_file() {
+                    zip.start_file(final_path.to_string_lossy(), options).unwrap();
+                    let mut f = File::open(entry_path).unwrap();
+                    io::copy(&mut f, &mut zip).unwrap();
+                } else if !relative.as_os_str().is_empty() {
+                    zip.add_directory(final_path.to_string_lossy(), options).unwrap();
                 }
-            };
-
-            let zip_folder = base_path.file_name().unwrap();
-            let final_path = Path::new(zip_folder).join(relative);
-
-            if path.is_file() {
-                zip.start_file(final_path.to_string_lossy(), options).unwrap();
-                let mut f = File::open(path).unwrap();
-                io::copy(&mut f, &mut zip).unwrap();
-            } else if !relative.as_os_str().is_empty() {
-                zip.add_directory(final_path.to_string_lossy(), options).unwrap();
             }
         }
     }
@@ -210,20 +230,23 @@ fn restore_backup_gui(zip_path: &PathBuf) -> Result<(), String> {
     let file = File::open(zip_path).map_err(|e| e.to_string())?;
     let mut archive = ZipArchive::new(file).map_err(|e| e.to_string())?;
 
-    let mut folder_map = HashMap::new();
+    let mut path_map = HashMap::new();
     let mut valid = false;
 
+    // Parse fingerprint.txt
     for i in 0..archive.len() {
         let mut file = archive.by_index(i).unwrap();
         if file.name() == "fingerprint.txt" {
             let mut contents = String::new();
             file.read_to_string(&mut contents).unwrap();
+
             if contents.contains("pillupaa") {
                 valid = true;
                 for line in contents.lines() {
                     if let Some((_, path)) = line.split_once(": ") {
-                        if let Some(name) = Path::new(path).file_name() {
-                            folder_map.insert(name.to_string_lossy().to_string(), path.to_string());
+                        let full_path = PathBuf::from(path);
+                        if let Some(name) = full_path.file_name() {
+                            path_map.insert(name.to_string_lossy().to_string(), full_path);
                         }
                     }
                 }
@@ -236,33 +259,53 @@ fn restore_backup_gui(zip_path: &PathBuf) -> Result<(), String> {
         return Err("Invalid backup fingerprint.".into());
     }
 
+    // Restore all files
     for i in 0..archive.len() {
         let mut file = archive.by_index(i).unwrap();
-        let internal_path = Path::new(file.name());
+        let name_in_zip = file.name();
 
-        if file.name() == "fingerprint.txt" {
+        if name_in_zip == "fingerprint.txt" {
             continue;
         }
 
-        let root = internal_path.components().next().unwrap().as_os_str().to_string_lossy();
-        let base = match folder_map.get(&root.to_string()) {
-            Some(p) => Path::new(p),
-            None => {
-                continue;
-            }
-        };
+        let zip_path = Path::new(name_in_zip);
+        let first_component = zip_path.components().next();
 
-        let relative = internal_path.strip_prefix(&root.to_string()).unwrap();
-        let full_path = base.join(relative);
-
-        if file.name().ends_with('/') {
-            fs::create_dir_all(&full_path).unwrap();
-        } else {
-            if let Some(parent) = full_path.parent() {
-                fs::create_dir_all(parent).unwrap();
+        // If it's a top-level file like "Untitled.veg"
+        if zip_path.components().count() == 1 {
+            if let Some(target) = path_map.get(name_in_zip) {
+                if let Some(parent) = target.parent() {
+                    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                }
+                let mut out = File::create(target).map_err(|e| e.to_string())?;
+                io::copy(&mut file, &mut out).map_err(|e| e.to_string())?;
             }
-            let mut out = File::create(&full_path).unwrap();
-            std::io::copy(&mut file, &mut out).unwrap();
+            continue;
+        }
+
+        // Otherwise, it's part of a folder
+        if let Some(first) = first_component {
+            let root = first.as_os_str().to_string_lossy().to_string();
+            if let Some(base_path) = path_map.get(&root) {
+                let relative_path = match zip_path.strip_prefix(&root) {
+                    Ok(r) => r,
+                    Err(_) => {
+                        continue;
+                    }
+                };
+
+                let full_path = base_path.join(relative_path);
+
+                if file.name().ends_with('/') {
+                    fs::create_dir_all(&full_path).map_err(|e| e.to_string())?;
+                } else {
+                    if let Some(parent) = full_path.parent() {
+                        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                    }
+                    let mut out = File::create(&full_path).map_err(|e| e.to_string())?;
+                    io::copy(&mut file, &mut out).map_err(|e| e.to_string())?;
+                }
+            }
         }
     }
 
