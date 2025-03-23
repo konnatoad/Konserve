@@ -1,3 +1,5 @@
+#![windows_subsystem = "windows"]
+
 use std::collections::HashMap;
 use std::fs::{ self, File };
 use std::io::{ self, Read, Write };
@@ -14,8 +16,8 @@ use zip::{ write::FileOptions, CompressionMethod, ZipArchive, ZipWriter };
 use egui::viewport::IconData;
 
 fn load_icon_image() -> Arc<IconData> {
-    let image_bytes = std::fs::read("src/assets/icon.png").expect("Failed to read icon.png");
-    let image = image::load_from_memory(&image_bytes).expect("Invalid image").into_rgba8();
+    let image_bytes = include_bytes!("assets/icon.png");
+    let image = image::load_from_memory(image_bytes).expect("Invalid image").into_rgba8();
     let (width, height) = image.dimensions();
     let pixels = image.into_raw();
 
