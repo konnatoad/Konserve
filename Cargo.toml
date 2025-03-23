@@ -1,9 +1,12 @@
 [package]
 name = "kafkacanc"
 version = "0.1.0"
-edition = "2025"
+edition = "2024"
 
 [dependencies]
-zip = "0.6"
-walkdir = "2.4"
-chrono = "0.4"
+zip = "2.4.2"
+walkdir = "2.5.0"
+chrono = "0.4.40"
+eframe = "0.31.1"
+rfd = "0.15.3"  # For native file/folder pickers
+image = "0.25.5"
