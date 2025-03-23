@@ -35,7 +35,7 @@ fn main() -> Result<(), eframe::Error> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder
             ::default()
-            .with_inner_size([400.0, 400.0])
+            .with_inner_size([400.0, 420.0])
             .with_resizable(false)
             .with_icon(icon),
         ..Default::default()
@@ -119,6 +119,12 @@ impl eframe::App for GUIApp {
                 self.selected_folders.remove(index);
             }
 
+            ui.add_space(4.0);
+
+            if ui.button("Clear All").clicked() {
+                self.selected_folders.clear();
+            }
+
             ui.separator();
 
             if ui.button("Save Template").clicked() {
@@ -150,12 +156,27 @@ impl eframe::App for GUIApp {
                 if let Some(path) = load_path {
                     if let Ok(data) = fs::read_to_string(&path) {
                         if let Ok(template) = serde_json::from_str::<BackupTemplate>(&data) {
-                            let flrtd: Vec<PathBuf> = template.paths
-                                .into_iter()
-                                .filter(|p| p.exists())
-                                .collect();
-                            self.selected_folders = flrtd;
-                            *self.status.lock().unwrap() = "✅ Template loaded.".into();
+                            let mut corrected_paths = Vec::new();
+                            let mut skipped = Vec::new();
+
+                            for original in template.paths {
+                                match fix_skip(&original) {
+                                    Some(p) => corrected_paths.push(p),
+                                    None => skipped.push(original),
+                                }
+                            }
+
+                            self.selected_folders = corrected_paths;
+
+                            if skipped.is_empty() {
+                                *self.status.lock().unwrap() = "✅ Template loaded.".into();
+                            } else {
+                                let msg = format!(
+                                    "✅ Template loaded with {} paths skipped.",
+                                    skipped.len()
+                                );
+                                *self.status.lock().unwrap() = msg;
+                            }
                         } else {
                             *self.status.lock().unwrap() = "❌ Invalid template format.".into();
                         }
@@ -171,6 +192,8 @@ impl eframe::App for GUIApp {
                     *status.lock().unwrap() = "❌ No folders selected.".into();
                     return;
                 }
+
+                *status.lock().unwrap() = "Compressing backup...".into();
 
                 thread::spawn(move || {
                     let output_dir = FileDialog::new()
@@ -197,6 +220,7 @@ impl eframe::App for GUIApp {
 
             if ui.button("Restore Backup").clicked() {
                 let status = self.status.clone();
+                *status.lock().unwrap() = "Restoring backup...".into();
                 thread::spawn(move || {
                     let zip_file = FileDialog::new().add_filter("zip", &["zip"]).pick_file();
                     if let Some(file) = zip_file {
@@ -233,7 +257,7 @@ fn create_temp_backup_gui(folders: &[PathBuf], output_dir: &PathBuf) -> Result<P
     );
 
     zip.start_file("fingerprint.txt", options).unwrap();
-    let mut fingerprint = String::from("pillupaa\n[Backup Info]\n");
+    let mut fingerprint = String::from("YH4^7u2*@^e#fI$D0\n[Backup Info]\n");
     for (i, folder) in folders.iter().enumerate() {
         fingerprint.push_str(&format!("Folder {}: {}\n", i + 1, folder.display()));
     }
@@ -286,7 +310,7 @@ fn restore_backup_gui(zip_path: &PathBuf) -> Result<(), String> {
             let mut contents = String::new();
             file.read_to_string(&mut contents).unwrap();
 
-            if contents.contains("pillupaa") {
+            if contents.contains("YH4^7u2*@^e#fI$D0") {
                 valid = true;
                 for line in contents.lines() {
                     if let Some((_, path)) = line.split_once(": ") {
@@ -371,4 +395,19 @@ fn adjust_path(original: &PathBuf, current_home: &PathBuf) -> PathBuf {
     }
 
     original.clone()
+}
+
+fn fix_skip(p: &PathBuf) -> Option<PathBuf> {
+    if p.exists() {
+        return Some(p.clone());
+    }
+
+    let current_home = dirs::home_dir()?;
+    let adjusted = adjust_path(p, &current_home);
+
+    if adjusted.exists() {
+        Some(adjusted)
+    } else {
+        None
+    }
 }
