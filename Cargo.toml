@@ -2,6 +2,7 @@
 name = "kafkacanc"
 version = "0.1.0"
 edition = "2024"
+build = "build.rs"
 
 [dependencies]
 zip = "2.4.2"
@@ -10,3 +11,6 @@ chrono = "0.4.40"
 eframe = "0.31.1"
 rfd = "0.15.3"  # For native file/folder pickers
 image = "0.25.5"
+
+[profile.release]
+strip = true
