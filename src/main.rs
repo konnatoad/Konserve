@@ -10,13 +10,14 @@ use std::thread;
 use chrono::Local;
 use eframe::egui;
 use rfd::FileDialog;
+use serde::{ Deserialize, Serialize };
 use walkdir::WalkDir;
 use zip::{ write::FileOptions, CompressionMethod, ZipArchive, ZipWriter };
 
 use egui::viewport::IconData;
 
 fn load_icon_image() -> Arc<IconData> {
-    let image_bytes = include_bytes!("assets/icon.png");
+    let image_bytes = include_bytes!("../assets/icon.png");
     let image = image::load_from_memory(image_bytes).expect("Invalid image").into_rgba8();
     let (width, height) = image.dimensions();
     let pixels = image.into_raw();
@@ -45,6 +46,11 @@ fn main() -> Result<(), eframe::Error> {
         options,
         Box::new(|_cc| Ok(Box::new(GUIApp::default())))
     )
+}
+
+#[derive(Serialize, Deserialize)]
+struct BackupTemplate {
+    paths: Vec<PathBuf>,
 }
 
 struct GUIApp {
@@ -96,7 +102,6 @@ impl eframe::App for GUIApp {
             ui.add_space(4.0);
 
             let mut to_remove: Option<usize> = None;
-
             egui::ScrollArea
                 ::vertical()
                 .max_height(200.0)
@@ -115,6 +120,48 @@ impl eframe::App for GUIApp {
             }
 
             ui.separator();
+
+            if ui.button("Save Template").clicked() {
+                let save_path = FileDialog::new()
+                    .add_filter("JSON", &["json"])
+                    .set_title("Save Template")
+                    .save_file();
+
+                if let Some(path) = save_path {
+                    let template = BackupTemplate {
+                        paths: self.selected_folders.clone(),
+                    };
+                    if let Ok(json) = serde_json::to_string_pretty(&template) {
+                        if fs::write(&path, json).is_ok() {
+                            *self.status.lock().unwrap() = "✅ Template saved.".into();
+                        } else {
+                            *self.status.lock().unwrap() = "❌ Failed to save template.".into();
+                        }
+                    }
+                }
+            }
+
+            if ui.button("Load Template").clicked() {
+                let load_path = FileDialog::new()
+                    .add_filter("JSON", &["json"])
+                    .set_title("Load Template")
+                    .pick_file();
+
+                if let Some(path) = load_path {
+                    if let Ok(data) = fs::read_to_string(&path) {
+                        if let Ok(template) = serde_json::from_str::<BackupTemplate>(&data) {
+                            let flrtd: Vec<PathBuf> = template.paths
+                                .into_iter()
+                                .filter(|p| p.exists())
+                                .collect();
+                            self.selected_folders = flrtd;
+                            *self.status.lock().unwrap() = "✅ Template loaded.".into();
+                        } else {
+                            *self.status.lock().unwrap() = "❌ Invalid template format.".into();
+                        }
+                    }
+                }
+            }
 
             if ui.button("Create Backup").clicked() {
                 let status = self.status.clone();
@@ -233,7 +280,6 @@ fn restore_backup_gui(zip_path: &PathBuf) -> Result<(), String> {
     let mut path_map = HashMap::new();
     let mut valid = false;
 
-    // Parse fingerprint.txt
     for i in 0..archive.len() {
         let mut file = archive.by_index(i).unwrap();
         if file.name() == "fingerprint.txt" {
@@ -259,6 +305,8 @@ fn restore_backup_gui(zip_path: &PathBuf) -> Result<(), String> {
         return Err("Invalid backup fingerprint.".into());
     }
 
+    let current_user_home = dirs::home_dir().unwrap_or(PathBuf::from("C:\\"));
+
     for i in 0..archive.len() {
         let mut file = archive.by_index(i).unwrap();
         let name_in_zip = file.name();
@@ -268,30 +316,26 @@ fn restore_backup_gui(zip_path: &PathBuf) -> Result<(), String> {
         }
 
         let zip_path = Path::new(name_in_zip);
-        let first_component = zip_path.components().next();
 
         if zip_path.components().count() == 1 {
             if let Some(target) = path_map.get(name_in_zip) {
-                if let Some(parent) = target.parent() {
+                let adjusted_path = adjust_path(target, &current_user_home);
+                if let Some(parent) = adjusted_path.parent() {
                     fs::create_dir_all(parent).map_err(|e| e.to_string())?;
                 }
-                let mut out = File::create(target).map_err(|e| e.to_string())?;
+                let mut out = File::create(adjusted_path).map_err(|e| e.to_string())?;
                 io::copy(&mut file, &mut out).map_err(|e| e.to_string())?;
             }
             continue;
         }
 
-        if let Some(first) = first_component {
-            let root = first.as_os_str().to_string_lossy().to_string();
-            if let Some(base_path) = path_map.get(&root) {
-                let relative_path = match zip_path.strip_prefix(&root) {
-                    Ok(r) => r,
-                    Err(_) => {
-                        continue;
-                    }
-                };
+        if let Some(root_component) = zip_path.components().next() {
+            let root_name = root_component.as_os_str().to_string_lossy().to_string();
+            if let Some(base_original_path) = path_map.get(&root_name) {
+                let adjusted_base = adjust_path(base_original_path, &current_user_home);
 
-                let full_path = base_path.join(relative_path);
+                let relative_path = zip_path.strip_prefix(&root_name).unwrap();
+                let full_path = adjusted_base.join(relative_path);
 
                 if file.name().ends_with('/') {
                     fs::create_dir_all(&full_path).map_err(|e| e.to_string())?;
@@ -307,4 +351,24 @@ fn restore_backup_gui(zip_path: &PathBuf) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn adjust_path(original: &PathBuf, current_home: &PathBuf) -> PathBuf {
+    let og_str = original.to_string_lossy();
+    let current_str = current_home.to_string_lossy();
+
+    if og_str.to_lowercase().starts_with("c:\\users\\") {
+        let parts: Vec<&str> = og_str.split('\\').collect();
+        if parts.len() > 2 {
+            let old_username = parts[2];
+            let expected_prefix = format!("C:\\Users\\{}", old_username);
+
+            if og_str.starts_with(&expected_prefix) {
+                let rel_path = og_str.strip_prefix(&expected_prefix).unwrap_or("");
+                return PathBuf::from(format!("{}{}", current_str, rel_path));
+            }
+        }
+    }
+
+    original.clone()
 }
