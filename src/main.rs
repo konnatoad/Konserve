@@ -6,6 +6,7 @@ use std::io::{ self, Read, Write };
 use std::path::{ Path, PathBuf };
 use std::sync::{ Arc, Mutex };
 use std::thread;
+use std::env;
 
 use chrono::Local;
 use eframe::egui;
@@ -15,6 +16,10 @@ use walkdir::WalkDir;
 use zip::{ write::FileOptions, CompressionMethod, ZipArchive, ZipWriter };
 
 use egui::viewport::IconData;
+
+fn get_fingered() -> String {
+    env::var("FINGERPRINT").unwrap_or_else(|_| "DEFAULT_FINGERPRINT".to_string())
+}
 
 fn load_icon_image() -> Arc<IconData> {
     let image_bytes = include_bytes!("../assets/icon.png");
@@ -30,12 +35,14 @@ fn load_icon_image() -> Arc<IconData> {
 }
 
 fn main() -> Result<(), eframe::Error> {
+    dotenv::dotenv().ok();
+
     let icon = load_icon_image();
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder
             ::default()
-            .with_inner_size([400.0, 420.0])
+            .with_inner_size([410.0, 450.0])
             .with_resizable(false)
             .with_icon(icon),
         ..Default::default()
@@ -56,6 +63,8 @@ struct BackupTemplate {
 struct GUIApp {
     status: Arc<Mutex<String>>,
     selected_folders: Vec<PathBuf>,
+    template_editor: bool,
+    template_paths: Vec<PathBuf>,
 }
 
 impl Default for GUIApp {
@@ -63,6 +72,8 @@ impl Default for GUIApp {
         Self {
             status: Arc::new(Mutex::new("Waiting...".into())),
             selected_folders: Vec::new(),
+            template_editor: false,
+            template_paths: Vec::new(),
         }
     }
 }
@@ -72,6 +83,91 @@ impl eframe::App for GUIApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("VanManen Backup Tool");
             ui.separator();
+
+            if self.template_editor {
+                ui.label("Editing");
+
+                ui.add_space(4.0);
+
+                egui::ScrollArea
+                    ::vertical()
+                    .max_height(290.0)
+                    .stick_to_right(true)
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        let max_wdt = ui.available_width() - 16.0;
+                        let mut to_remove = None;
+
+                        for (i, path) in self.template_paths.iter_mut().enumerate() {
+                            let mut path_str = path.display().to_string();
+
+                            ui.horizontal(|ui| {
+                                let height = 20.0;
+                                let width = max_wdt - 140.0;
+
+                                ui.add_sized(
+                                    [width.min(250.0), height],
+                                    egui::TextEdit::singleline(&mut path_str)
+                                );
+
+                                if path_str != path.display().to_string() {
+                                    *path = PathBuf::from(path_str.clone());
+                                }
+
+                                if !path.exists() {
+                                    ui.label("❌");
+                                } else {
+                                    ui.label("✅");
+                                }
+
+                                if ui.button("Browse").clicked() {
+                                    if let Some(p) = FileDialog::new().pick_file() {
+                                        *path = p;
+                                    }
+                                }
+
+                                if ui.button("Remove").clicked() {
+                                    to_remove = Some(i);
+                                }
+                            });
+                        }
+
+                        if let Some(index) = to_remove {
+                            self.template_paths.remove(index);
+                        }
+                    });
+
+                ui.separator();
+
+                if ui.button("Add Path").clicked() {
+                    self.template_paths.push(PathBuf::from(""));
+                }
+
+                if ui.button("Save Template").clicked() {
+                    let save_path = FileDialog::new().add_filter("JSON", &["json"]).save_file();
+
+                    if let Some(path) = save_path {
+                        let new_template = BackupTemplate {
+                            paths: self.template_paths.clone(),
+                        };
+
+                        if let Ok(json) = serde_json::to_string_pretty(&new_template) {
+                            if fs::write(&path, json).is_ok() {
+                                *self.status.lock().unwrap() = "✅ Template saved".into();
+                                self.template_editor = false;
+                            } else {
+                                *self.status.lock().unwrap() = "❌ Failed to save template".into();
+                            }
+                        }
+                    }
+                }
+
+                if ui.button("Cancel").clicked() {
+                    self.template_editor = false;
+                }
+
+                return;
+            }
 
             ui.horizontal(|ui| {
                 if ui.button("Add Folders").clicked() {
@@ -127,26 +223,6 @@ impl eframe::App for GUIApp {
 
             ui.separator();
 
-            if ui.button("Save Template").clicked() {
-                let save_path = FileDialog::new()
-                    .add_filter("JSON", &["json"])
-                    .set_title("Save Template")
-                    .save_file();
-
-                if let Some(path) = save_path {
-                    let template = BackupTemplate {
-                        paths: self.selected_folders.clone(),
-                    };
-                    if let Ok(json) = serde_json::to_string_pretty(&template) {
-                        if fs::write(&path, json).is_ok() {
-                            *self.status.lock().unwrap() = "✅ Template saved.".into();
-                        } else {
-                            *self.status.lock().unwrap() = "❌ Failed to save template.".into();
-                        }
-                    }
-                }
-            }
-
             if ui.button("Load Template").clicked() {
                 let load_path = FileDialog::new()
                     .add_filter("JSON", &["json"])
@@ -179,6 +255,44 @@ impl eframe::App for GUIApp {
                             }
                         } else {
                             *self.status.lock().unwrap() = "❌ Invalid template format.".into();
+                        }
+                    }
+                }
+            }
+
+            if ui.button("Save Template").clicked() {
+                let save_path = FileDialog::new()
+                    .add_filter("JSON", &["json"])
+                    .set_title("Save Template")
+                    .save_file();
+
+                if let Some(path) = save_path {
+                    let template = BackupTemplate {
+                        paths: self.selected_folders.clone(),
+                    };
+                    if let Ok(json) = serde_json::to_string_pretty(&template) {
+                        if fs::write(&path, json).is_ok() {
+                            *self.status.lock().unwrap() = "✅ Template saved.".into();
+                        } else {
+                            *self.status.lock().unwrap() = "❌ Failed to save template.".into();
+                        }
+                    }
+                }
+            }
+
+            if ui.button("Edit Template").clicked() {
+                if
+                    let Some(path) = FileDialog::new()
+                        .add_filter("JSON", &["json"])
+                        .set_title("Select template")
+                        .pick_file()
+                {
+                    if let Ok(data) = fs::read_to_string(&path) {
+                        if let Ok(template) = serde_json::from_str::<BackupTemplate>(&data) {
+                            self.template_paths = template.paths;
+                            self.template_editor = true;
+                        } else {
+                            *self.status.lock().unwrap() = "❌ Failed to parse template.".into();
                         }
                     }
                 }
@@ -257,7 +371,7 @@ fn create_temp_backup_gui(folders: &[PathBuf], output_dir: &PathBuf) -> Result<P
     );
 
     zip.start_file("fingerprint.txt", options).unwrap();
-    let mut fingerprint = String::from("YH4^7u2*@^e#fI$D0\n[Backup Info]\n");
+    let mut fingerprint = format!("{}\n[Backup Info]\n", get_fingered());
     for (i, folder) in folders.iter().enumerate() {
         fingerprint.push_str(&format!("Folder {}: {}\n", i + 1, folder.display()));
     }
@@ -310,7 +424,7 @@ fn restore_backup_gui(zip_path: &PathBuf) -> Result<(), String> {
             let mut contents = String::new();
             file.read_to_string(&mut contents).unwrap();
 
-            if contents.contains("YH4^7u2*@^e#fI$D0") {
+            if contents.contains(&get_fingered()) {
                 valid = true;
                 for line in contents.lines() {
                     if let Some((_, path)) = line.split_once(": ") {
