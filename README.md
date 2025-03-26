@@ -18,6 +18,8 @@ This tool allows you to back up important files, folders, and restore them later
 ---
 
 ## UI Preview
-![image](https://github.com/user-attachments/assets/9d8b4dbf-be93-4b94-95c3-9b152b0eda85)
+![image](https://github.com/user-attachments/assets/8c1bd5c1-4f7d-4a37-96aa-57350a92cb95) ![image](https://github.com/user-attachments/assets/a6e7ae51-6f2b-4fc3-b56d-19cd6b1d6ae1)
+
+
 
 
