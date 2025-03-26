@@ -262,7 +262,7 @@ impl eframe::App for GUIApp {
                         if let Ok(template) = serde_json::from_str::<BackupTemplate>(&data) {
                             self.template_paths = template.paths
                                 .into_iter()
-                                .filter_map(|p| fix_skip(&p))
+                                .map(|p| fix_skip(&p).unwrap_or(p))
                                 .collect();
                             self.template_editor = true;
                         } else {
