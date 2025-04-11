@@ -6,6 +6,4 @@ launch.json
 **/*.rs.bk
 *.rmeta
 /.cargo/
-/assets/icon.ico
-/assets/icon.png
 .env
