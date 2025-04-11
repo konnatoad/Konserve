@@ -4,14 +4,14 @@ use std::{ fs::File, io::{ self, Write }, path::{ Path, PathBuf } };
 use chrono::Local;
 use serde::{ Deserialize, Serialize };
 use walkdir::WalkDir;
-use zip::{ write::FileOptions, CompressionMethod, ZipWriter };
+use zip::{ CompressionMethod, ZipWriter, write::FileOptions };
 
 #[derive(Serialize, Deserialize)]
 struct BackupTemplate {
     paths: Vec<PathBuf>,
 }
 
-pub fn backup_gui(folders: &[PathBuf], output_dir: &PathBuf) -> Result<PathBuf, String> {
+pub fn backup_gui(folders: &[PathBuf], output_dir: &Path) -> Result<PathBuf, String> {
     let timestamp = Local::now().format("%Y-%m-%d_%H-%M-%S");
     let zip_name = format!("backup_{}.zip", timestamp);
     let zip_path = output_dir.join(&zip_name);
@@ -24,9 +24,12 @@ pub fn backup_gui(folders: &[PathBuf], output_dir: &PathBuf) -> Result<PathBuf, 
 
     zip.start_file("fingerprint.txt", options).unwrap();
     let mut fingerprint = format!("{}\n[Backup Info]\n", get_fingered());
-    for (i, folder) in folders.iter().enumerate() {
-        fingerprint.push_str(&format!("Folder {}: {}\n", i + 1, folder.display()));
+    for folder in folders {
+        if let Some(name) = folder.file_name() {
+            fingerprint.push_str(&format!("{}: {}\n", name.to_string_lossy(), folder.display()));
+        }
     }
+
     zip.write_all(fingerprint.as_bytes()).unwrap();
 
     for path in folders {
