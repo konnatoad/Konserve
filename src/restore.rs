@@ -70,10 +70,9 @@ pub fn restore_backup(
         if path_in_tar == "fingerprint.txt" {
             continue;
         }
-        if let Some(_) = &selected {
-            if !to_extract.contains(&path_in_tar) {
-                continue;
-            }
+
+        if selected.is_some() && !to_extract.contains(&path_in_tar) {
+            continue;
         }
 
         let tar_path = Path::new(&path_in_tar);
