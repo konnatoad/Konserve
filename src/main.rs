@@ -19,9 +19,62 @@ use std::{
 };
 
 use eframe::egui;
+use egui::CollapsingHeader;
 use egui::IconData;
 use rfd::FileDialog;
 use serde::{Deserialize, Serialize};
+
+fn build_human_tree(
+    entries: Vec<String>,
+    path_map: std::collections::HashMap<String, PathBuf>,
+) -> FolderTreeNode {
+    let mut root = FolderTreeNode::default();
+
+    for (uuid, orig) in path_map {
+        let parent = orig.parent().unwrap_or(&orig);
+        let parent_label = parent.display().to_string();
+        let folder_name = orig.file_name().unwrap().to_string_lossy().to_string();
+        let prefix = format!("{}/", uuid);
+
+        {
+            let pnode = root
+                .children
+                .entry(parent_label.clone())
+                .or_insert_with(FolderTreeNode::default);
+            pnode.is_file = false;
+            let fnode = pnode
+                .children
+                .entry(folder_name.clone())
+                .or_insert_with(FolderTreeNode::default);
+            fnode.is_file = false;
+        }
+
+        for e in &entries {
+            if let Some(stripped) = e.strip_prefix(&prefix) {
+                let rest = stripped.trim_end_matches('/');
+                if rest.is_empty() {
+                    continue;
+                }
+                let mut cursor = root
+                    .children
+                    .get_mut(&parent_label)
+                    .unwrap()
+                    .children
+                    .get_mut(&folder_name)
+                    .unwrap();
+                for part in rest.split('/') {
+                    cursor = cursor
+                        .children
+                        .entry(part.to_string())
+                        .or_insert_with(FolderTreeNode::default);
+                }
+                cursor.is_file = true;
+            }
+        }
+    }
+
+    root
+}
 
 // if !icon then fuck you
 fn load_icon_image() -> Arc<IconData> {
@@ -50,6 +103,7 @@ struct FolderTreeNode {
     is_file: bool,
 }
 
+#[allow(dead_code)]
 fn build_tree_from_paths(paths: &[String]) -> FolderTreeNode {
     let mut root = FolderTreeNode::default();
     for path in paths {
@@ -105,28 +159,19 @@ fn render_tree(ui: &mut egui::Ui, path: &mut Vec<String>, node: &mut FolderTreeN
                 ui.label(label);
             });
         } else {
-            egui::CollapsingHeader::new(label)
-                .default_open(false)
-                .show(ui, |ui| {
-                    let folder_toggled = ui
-                        .horizontal(|ui| {
-                            let changed = ui.checkbox(&mut child.checked, "").changed();
-                            ui.label("(Folder)");
-                            changed
-                        })
-                        .inner;
-
-                    if folder_toggled {
-                        set_all_checked(child, child.checked);
-                    }
-                    render_tree(ui, path, child);
-
-                    if !folder_toggled {
-                        let any_checked = child.children.values().any(|c| c.checked);
-                        child.checked = any_checked;
-                    }
-                });
+            ui.horizontal(|ui| {
+                if ui.checkbox(&mut child.checked, "").changed() {
+                    set_all_checked(child, child.checked);
+                }
+                CollapsingHeader::new(label)
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        render_tree(ui, path, child);
+                    });
+            });
+            child.checked = child.children.values().any(|c| c.checked);
         }
+
         path.pop();
     }
 }
@@ -159,6 +204,7 @@ struct GUIApp {
     restore_editor: bool,
     restore_zip_path: Option<PathBuf>,
     restore_tree: FolderTreeNode,
+    saved_path_map: Option<HashMap<String, PathBuf>>,
 }
 
 impl Default for GUIApp {
@@ -171,6 +217,7 @@ impl Default for GUIApp {
             restore_editor: false,
             restore_zip_path: None,
             restore_tree: FolderTreeNode::default(),
+            saved_path_map: None,
         }
     }
 }
@@ -202,9 +249,12 @@ impl eframe::App for GUIApp {
                         let status = self.status.clone();
                         self.restore_editor = false;
 
-                        thread::spawn(move || match restore_backup(&zip_path, Some(selected)) {
-                            Ok(_) => *status.lock().unwrap() = "Restore complete.".into(),
-                            Err(e) => *status.lock().unwrap() = format!("Restore failed: {}", e),
+                        thread::spawn(move || {
+                            if let Err(e) =
+                                restore_backup(&zip_path, Some(selected), status.clone())
+                            {
+                                *status.lock().unwrap() = format!("❌ Restore failed: {}", e);
+                            }
                         });
                     }
                 }
@@ -447,7 +497,7 @@ impl eframe::App for GUIApp {
                                 return;
                             }
 
-                            *status.lock().unwrap() = "Compressing into zip...".into();
+                            *status.lock().unwrap() = "Packing into .tar".into();
 
                             thread::spawn(move || {
                                 if let Some(out_dir) = FileDialog::new()
@@ -478,12 +528,21 @@ impl eframe::App for GUIApp {
                             *status.lock().unwrap() = "Starting restore...".into();
 
                             if let Some(zip_file) =
-                                FileDialog::new().add_filter("zip", &["zip"]).pick_file()
+                                FileDialog::new().add_filter("tar", &["tar"]).pick_file()
                             {
                                 match parse_fingerprint(&zip_file) {
-                                    Ok(entries) => {
-                                        self.restore_zip_path = Some(zip_file);
-                                        self.restore_tree = build_tree_from_paths(&entries);
+                                    Ok((entries, map)) => {
+                                        self.restore_zip_path = Some(zip_file.clone());
+                                        self.saved_path_map = Some(map.clone()); // ← store it
+                                        self.restore_tree = build_human_tree(entries, map);
+                                        // Walk the entire tree and set every `checked = true`
+                                        fn check_all(node: &mut FolderTreeNode) {
+                                            node.checked = true;
+                                            for child in node.children.values_mut() {
+                                                check_all(child);
+                                            }
+                                        }
+                                        check_all(&mut self.restore_tree);
                                         self.restore_editor = true;
                                     }
                                     Err(e) => {
