@@ -1,9 +1,11 @@
 use std::{
+    collections::HashMap,
     env,
     fs::File,
+    io::Read,
     path::{Path, PathBuf},
 };
-use zip::ZipArchive;
+use tar::Archive;
 
 use crate::FolderTreeNode;
 
@@ -26,23 +28,42 @@ pub fn collect_paths(root: &FolderTreeNode) -> Vec<String> {
     result
 }
 
-pub fn parse_fingerprint(zip_path: &PathBuf) -> Result<Vec<String>, String> {
+pub fn parse_fingerprint(
+    zip_path: &PathBuf,
+) -> Result<(Vec<String>, HashMap<String, PathBuf>), String> {
     let file = File::open(zip_path).map_err(|e| e.to_string())?;
-    let mut archive = ZipArchive::new(file).map_err(|e| e.to_string())?;
+    let mut archive = Archive::new(file);
+    let mut path_map = HashMap::new();
 
-    let mut entries = Vec::new();
-
-    for i in 0..archive.len() {
-        let file = archive.by_index(i).map_err(|e| e.to_string())?;
-        let name = file.name();
-
-        //skip metadata
-        if name != "fingerprint.txt" {
-            entries.push(name.to_string());
+    for entry in archive.entries().map_err(|e| e.to_string())? {
+        let mut entry = entry.map_err(|e| e.to_string())?;
+        let header_path = entry.path().map_err(|e| e.to_string())?;
+        let name = header_path.to_string_lossy();
+        if name == "fingerprint.txt" {
+            let mut txt = String::new();
+            entry.read_to_string(&mut txt).map_err(|e| e.to_string())?;
+            for line in txt.lines().filter(|l| l.contains(": ")) {
+                let (uuid, p) = line.split_once(": ").unwrap();
+                path_map.insert(uuid.to_string(), PathBuf::from(p.trim()));
+            }
+            break;
         }
     }
 
-    Ok(entries)
+    let file = File::open(zip_path).map_err(|e| e.to_string())?;
+    let mut archive = Archive::new(file);
+    let mut entries = Vec::new();
+
+    for entry in archive.entries().map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let entry_path = entry.path().map_err(|e| e.to_string())?;
+        let entry_name = entry_path.to_string_lossy().into_owned();
+        if entry_name != "fingerprint.txt" {
+            entries.push(entry_name);
+        }
+    }
+
+    Ok((entries, path_map))
 }
 
 pub fn get_fingered() -> String {
