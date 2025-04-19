@@ -68,3 +68,17 @@ This allows seamless migration between machines or profiles.
 - (Optional) `.env` file with a custom fingerprint:
   ```env
   FINGERPRINT=MyMachine123
+  ```
+
+###  Build It
+
+```bash
+cargo build --release
+```
+
+Your executable will be located in:
+
+```
+target/release/kafkaBackup.exe
+```
+
