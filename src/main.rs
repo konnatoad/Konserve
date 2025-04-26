@@ -24,44 +24,45 @@ use egui::IconData;
 use rfd::FileDialog;
 use serde::{Deserialize, Serialize};
 
-fn build_human_tree(
-    entries: Vec<String>,
-    path_map: std::collections::HashMap<String, PathBuf>,
-) -> FolderTreeNode {
+fn build_human_tree(entries: Vec<String>, path_map: HashMap<String, PathBuf>) -> FolderTreeNode {
     let mut root = FolderTreeNode::default();
 
-    for (uuid, orig) in path_map {
-        let parent = orig.parent().unwrap_or(&orig);
-        let parent_label = parent.display().to_string();
-        let folder_name = orig.file_name().unwrap().to_string_lossy().to_string();
-        let prefix = format!("{}/", uuid);
+    for (uuid, original_path) in path_map {
+        let parent_label = original_path
+            .parent()
+            .unwrap_or(&original_path)
+            .display()
+            .to_string();
+        let item_name = original_path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
 
-        {
-            let pnode = root
-                .children
-                .entry(parent_label.clone())
-                .or_insert_with(FolderTreeNode::default);
-            pnode.is_file = false;
-            let fnode = pnode
-                .children
-                .entry(folder_name.clone())
-                .or_insert_with(FolderTreeNode::default);
-            fnode.is_file = false;
-        }
+        let parent_node = root
+            .children
+            .entry(parent_label.clone())
+            .or_insert_with(FolderTreeNode::default);
 
-        for e in &entries {
-            if let Some(stripped) = e.strip_prefix(&prefix) {
-                let rest = stripped.trim_end_matches('/');
+        let _ = parent_node
+            .children
+            .entry(item_name.clone())
+            .or_insert_with(FolderTreeNode::default);
+
+        let dir_prefix = format!("{uuid}/");
+        let is_dir_backup = entries.iter().any(|e| e.starts_with(&dir_prefix));
+
+        if is_dir_backup {
+            parent_node.children.get_mut(&item_name).unwrap().is_file = false;
+
+            for tar_path in entries.iter().filter(|e| e.starts_with(&dir_prefix)) {
+                let rest = tar_path[dir_prefix.len()..].trim_end_matches('/');
                 if rest.is_empty() {
                     continue;
                 }
-                let mut cursor = root
-                    .children
-                    .get_mut(&parent_label)
-                    .unwrap()
-                    .children
-                    .get_mut(&folder_name)
-                    .unwrap();
+
+                let mut cursor = parent_node.children.get_mut(&item_name).unwrap();
+
                 for part in rest.split('/') {
                     cursor = cursor
                         .children
@@ -70,6 +71,8 @@ fn build_human_tree(
                 }
                 cursor.is_file = true;
             }
+        } else {
+            parent_node.children.get_mut(&item_name).unwrap().is_file = true;
         }
     }
 
