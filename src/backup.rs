@@ -1,9 +1,13 @@
 use crate::helpers::get_fingered;
-use std::{ fs::File, io, path::{ Path, PathBuf } };
+use std::{
+    fs::File,
+    io,
+    path::{Path, PathBuf},
+};
 
 use chrono::Local;
-use serde::{ Deserialize, Serialize };
-use tar::{ Builder, Header };
+use serde::{Deserialize, Serialize};
+use tar::{Builder, Header};
 use uuid::Uuid;
 use walkdir::WalkDir;
 
@@ -40,18 +44,47 @@ pub fn backup_gui(folders: &[PathBuf], output_dir: &Path) -> Result<PathBuf, Str
     fingerprint_header.set_cksum();
 
     tar_builder
-        .append_data(&mut fingerprint_header, "fingerprint.txt", fingerprint_content.as_bytes())
+        .append_data(
+            &mut fingerprint_header,
+            "fingerprint.txt",
+            fingerprint_content.as_bytes(),
+        )
         .map_err(|e| e.to_string())?;
 
     for (uuid, original_path) in folder_uuid {
-        for entry in WalkDir::new(original_path).into_iter().filter_map(Result::ok) {
+        if original_path.is_file() {
+            let metadata = original_path.metadata().map_err(|e| e.to_string())?;
+            let mut header = Header::new_gnu();
+            header.set_metadata(&metadata);
+            header.set_cksum();
+
+            let mut f = File::open(original_path).map_err(|e| e.to_string())?;
+
+            let entry_name = match original_path.extension().and_then(|e| e.to_str()) {
+                Some(ext) => format!("{}.{}", uuid, ext),
+                None => uuid.to_string(),
+            };
+
+            tar_builder
+                .append_data(&mut header, entry_name, &mut f)
+                .map_err(|e| e.to_string())?;
+
+            continue;
+        }
+
+        for entry in WalkDir::new(original_path)
+            .into_iter()
+            .filter_map(Result::ok)
+        {
             let entry_path = entry.path();
             let metadata = entry.metadata().map_err(|e| e.to_string())?;
             let relative_path = entry_path.strip_prefix(original_path).unwrap();
             let tar_entry_path = Path::new(&uuid.to_string()).join(relative_path);
+
             let mut header = Header::new_gnu();
             header.set_metadata(&metadata);
             header.set_cksum();
+
             if metadata.is_file() {
                 let mut file = File::open(entry_path).map_err(|e| e.to_string())?;
                 tar_builder
