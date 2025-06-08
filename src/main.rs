@@ -5,93 +5,101 @@ mod helpers;
 mod restore;
 
 use backup::backup_gui;
+use helpers::Progress;
 use helpers::collect_paths;
 use helpers::fix_skip;
 use helpers::parse_fingerprint;
 use restore::restore_backup;
 
-use std::{
-    collections::HashMap,
-    fs,
-    path::{Path, PathBuf},
-    sync::{Arc, Mutex},
-    thread,
-};
+use std::{ collections::HashMap, fs, path::{ Path, PathBuf }, sync::{ Arc, Mutex, mpsc }, thread };
 
 use eframe::egui;
 use egui::CollapsingHeader;
 use egui::IconData;
 use rfd::FileDialog;
-use serde::{Deserialize, Serialize};
+use serde::{ Deserialize, Serialize };
+
+type RestoreMsg = Result<(FolderTreeNode, PathBuf), String>;
 
 fn build_human_tree(entries: Vec<String>, path_map: HashMap<String, PathBuf>) -> FolderTreeNode {
+    println!("[DEBUG] build_human_tree: Start");
     let mut root = FolderTreeNode::default();
 
     for (uuid, original_path) in path_map {
-        let parent_label = original_path
-            .parent()
-            .unwrap_or(&original_path)
-            .display()
-            .to_string();
-        let item_name = original_path
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .to_string();
+        println!("[DEBUG] Processing UUID: {uuid}, Path: {:?}", original_path);
 
-        let parent_node = root
-            .children
+        let parent_label = original_path.parent().unwrap_or(&original_path).display().to_string();
+        let item_name = original_path.file_name().unwrap().to_string_lossy().to_string();
+
+        println!("[DEBUG] parent_label = \"{parent_label}\", item_name = \"{item_name}\"");
+
+        let parent_node = root.children
             .entry(parent_label.clone())
             .or_insert_with(FolderTreeNode::default);
 
-        let _ = parent_node
-            .children
-            .entry(item_name.clone())
-            .or_insert_with(FolderTreeNode::default);
+        parent_node.children.entry(item_name.clone()).or_insert_with(FolderTreeNode::default);
 
         let dir_prefix = format!("{uuid}/");
         let is_dir_backup = entries.iter().any(|e| e.starts_with(&dir_prefix));
 
         if is_dir_backup {
+            println!("[DEBUG] Detected directory backup for UUID: {uuid}");
             parent_node.children.get_mut(&item_name).unwrap().is_file = false;
 
             for tar_path in entries.iter().filter(|e| e.starts_with(&dir_prefix)) {
+                println!("[DEBUG]   tar_path = \"{tar_path}\"");
+
                 let rest = tar_path[dir_prefix.len()..].trim_end_matches('/');
                 if rest.is_empty() {
+                    println!("[DEBUG]   Skipping empty rest after trim");
                     continue;
                 }
+
+                println!("[DEBUG]   Rest path: \"{rest}\"");
 
                 let mut cursor = parent_node.children.get_mut(&item_name).unwrap();
 
                 for part in rest.split('/') {
-                    cursor = cursor
-                        .children
+                    println!("[DEBUG]     Descending into part: \"{part}\"");
+                    cursor = cursor.children
                         .entry(part.to_string())
                         .or_insert_with(FolderTreeNode::default);
                 }
                 cursor.is_file = true;
             }
         } else {
+            println!("[DEBUG] Detected file (not dir) for UUID: {uuid}");
             parent_node.children.get_mut(&item_name).unwrap().is_file = true;
         }
     }
 
+    println!("[DEBUG] build_human_tree: Finished building tree");
     root
 }
 
 // if !icon then fuck you
 fn load_icon_image() -> Arc<IconData> {
+    println!("[DEBUG] load_icon_image: Start");
+
     let image_bytes = include_bytes!("../assets/icon.png");
-    let image = image::load_from_memory(image_bytes)
+    println!("[DEBUG] Icon bytes loaded: {} bytes", image_bytes.len());
+
+    let image = image
+        ::load_from_memory(image_bytes)
         .expect("Icon image couldn't be loaded")
         .into_rgba8();
-    let (w, h) = image.dimensions();
 
-    Arc::new(IconData {
+    let (w, h) = image.dimensions();
+    println!("[DEBUG] Icon dimensions: {}x{}", w, h);
+
+    let icon_data = Arc::new(IconData {
         rgba: image.into_raw(),
         width: w,
         height: h,
-    })
+    });
+
+    println!("[DEBUG] load_icon_image: Done");
+    icon_data
 }
 
 #[derive(Serialize, Deserialize)]
@@ -113,14 +121,11 @@ fn build_tree_from_paths(paths: &[String]) -> FolderTreeNode {
         let mut current = &mut root;
         for part in Path::new(path).components() {
             let key = part.as_os_str().to_string_lossy().to_string();
-            current = current
-                .children
-                .entry(key.clone())
-                .or_insert(FolderTreeNode {
-                    children: HashMap::new(),
-                    checked: true,
-                    is_file: false,
-                });
+            current = current.children.entry(key.clone()).or_insert(FolderTreeNode {
+                children: HashMap::new(),
+                checked: true,
+                is_file: false,
+            });
         }
         current.is_file = true;
     }
@@ -128,8 +133,15 @@ fn build_tree_from_paths(paths: &[String]) -> FolderTreeNode {
 }
 
 fn set_all_checked(node: &mut FolderTreeNode, checked: bool) {
+    println!(
+        "[DEBUG] set_all_checked: Setting node (is_file: {}) to checked = {}",
+        node.is_file,
+        checked
+    );
+
     node.checked = checked;
-    for child in node.children.values_mut() {
+    for (name, child) in node.children.iter_mut() {
+        println!("[DEBUG]   -> Descending into child: \"{name}\"");
         set_all_checked(child, checked);
     }
 }
@@ -154,7 +166,9 @@ fn render_tree(ui: &mut egui::Ui, path: &mut Vec<String>, node: &mut FolderTreeN
         if !child.is_file {
             label.push('/');
         }
+
         path.push(name.clone());
+        let current_path = path.join("/");
 
         if child.children.is_empty() {
             ui.horizontal(|ui| {
@@ -164,6 +178,11 @@ fn render_tree(ui: &mut egui::Ui, path: &mut Vec<String>, node: &mut FolderTreeN
         } else {
             ui.horizontal(|ui| {
                 if ui.checkbox(&mut child.checked, "").changed() {
+                    println!(
+                        "[DEBUG] Checkbox changed: setting all children of \"{}\" to {}",
+                        current_path,
+                        child.checked
+                    );
                     set_all_checked(child, child.checked);
                 }
                 CollapsingHeader::new(label)
@@ -180,22 +199,32 @@ fn render_tree(ui: &mut egui::Ui, path: &mut Vec<String>, node: &mut FolderTreeN
 }
 
 fn main() -> Result<(), eframe::Error> {
+    println!("[DEBUG] main: Starting application");
+
     dotenv::dotenv().ok();
+    println!("[DEBUG] .env loaded (if present)");
 
     let icon = load_icon_image();
+    println!("[DEBUG] Icon loaded");
 
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
+        viewport: egui::ViewportBuilder
+            ::default()
             .with_inner_size([410.0, 450.0])
             .with_resizable(false)
             .with_icon(icon),
         ..Default::default()
     };
+    println!("[DEBUG] NativeOptions configured");
 
+    println!("[DEBUG] Launching GUI with run_native");
     eframe::run_native(
         "VanManen Backup Tool",
         options,
-        Box::new(|_cc| Ok(Box::new(GUIApp::default()))),
+        Box::new(|_cc| {
+            println!("[DEBUG] GUIApp::default() instantiated");
+            Ok(Box::new(GUIApp::default()))
+        })
     )
 }
 
@@ -207,7 +236,11 @@ struct GUIApp {
     restore_editor: bool,
     restore_zip_path: Option<PathBuf>,
     restore_tree: FolderTreeNode,
-    saved_path_map: Option<HashMap<String, PathBuf>>,
+    _saved_path_map: Option<HashMap<String, PathBuf>>,
+    backup_progress: Option<Progress>,
+    restore_progress: Option<Progress>,
+    restore_opening: bool,
+    restore_rx: Option<mpsc::Receiver<RestoreMsg>>,
 }
 
 impl Default for GUIApp {
@@ -220,7 +253,11 @@ impl Default for GUIApp {
             restore_editor: false,
             restore_zip_path: None,
             restore_tree: FolderTreeNode::default(),
-            saved_path_map: None,
+            _saved_path_map: None,
+            backup_progress: None,
+            restore_progress: None,
+            restore_opening: false,
+            restore_rx: None,
         }
     }
 }
@@ -228,6 +265,29 @@ impl Default for GUIApp {
 impl eframe::App for GUIApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
+            if let Some(finished_msg) = self.restore_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
+                match finished_msg {
+                    Ok((mut tree, zip)) => {
+                        // NEW: mark everything checked
+                        fn check_all(n: &mut FolderTreeNode) {
+                            n.checked = true;
+                            for c in n.children.values_mut() {
+                                check_all(c);
+                            }
+                        }
+                        check_all(&mut tree);
+
+                        self.restore_tree = tree;
+                        self.restore_zip_path = Some(zip);
+                        self.restore_editor = true;
+                    }
+                    Err(e) => {
+                        *self.status.lock().unwrap() = format!("Failed: {e}");
+                    }
+                }
+                self.restore_rx = None;
+            }
+
             ui.heading("VanManen Backup Tool");
             ui.separator();
 
@@ -236,7 +296,8 @@ impl eframe::App for GUIApp {
 
                 ui.add_space(4.0);
 
-                egui::ScrollArea::vertical()
+                egui::ScrollArea
+                    ::vertical()
                     .max_height(300.0)
                     .show(ui, |ui| {
                         let mut current_path = vec![];
@@ -250,15 +311,25 @@ impl eframe::App for GUIApp {
                         let selected = collect_paths(&self.restore_tree);
                         let zip_path = zip_path.clone();
                         let status = self.status.clone();
-                        self.restore_editor = false;
+
+                        let progress = Progress::default();
+                        self.restore_progress = Some(progress.clone());
+                        self.restore_opening = false;
 
                         thread::spawn(move || {
-                            if let Err(e) =
-                                restore_backup(&zip_path, Some(selected), status.clone())
+                            if
+                                let Err(e) = restore_backup(
+                                    &zip_path,
+                                    Some(selected),
+                                    status.clone(),
+                                    &progress
+                                )
                             {
                                 *status.lock().unwrap() = format!("❌ Restore failed: {}", e);
                             }
                         });
+
+                        self.restore_editor = false;
                     }
                 }
 
@@ -276,7 +347,8 @@ impl eframe::App for GUIApp {
 
                 ui.add_space(4.0);
 
-                egui::ScrollArea::vertical()
+                egui::ScrollArea
+                    ::vertical()
                     .max_height(285.0)
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
@@ -288,7 +360,7 @@ impl eframe::App for GUIApp {
                             ui.horizontal(|ui| {
                                 ui.add_sized(
                                     [240.0, 20.0],
-                                    egui::TextEdit::singleline(&mut path_str),
+                                    egui::TextEdit::singleline(&mut path_str)
                                 );
 
                                 if path_str != path.display().to_string() {
@@ -321,8 +393,7 @@ impl eframe::App for GUIApp {
                     self.template_paths.push(PathBuf::new());
                 }
                 if ui.button("Save Template").clicked() {
-                    if let Some(path) = FileDialog::new().add_filter("JSON", &["json"]).save_file()
-                    {
+                    if let Some(path) = FileDialog::new().add_filter("JSON", &["json"]).save_file() {
                         let tpl = BackupTemplate {
                             paths: self.template_paths.clone(),
                         };
@@ -373,7 +444,8 @@ impl eframe::App for GUIApp {
 
                 // selected paths
                 let mut to_remove = None;
-                egui::ScrollArea::vertical()
+                egui::ScrollArea
+                    ::vertical()
                     .max_height(240.0)
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
@@ -403,12 +475,16 @@ impl eframe::App for GUIApp {
                     ui.add_sized(btn_size, egui::Button::new("Load Template"))
                         .clicked()
                         .then(|| {
-                            if let Some(path) =
-                                FileDialog::new().add_filter("JSON", &["json"]).pick_file()
+                            if
+                                let Some(path) = FileDialog::new()
+                                    .add_filter("JSON", &["json"])
+                                    .pick_file()
                             {
                                 if let Ok(data) = fs::read_to_string(&path) {
-                                    if let Ok(template) =
-                                        serde_json::from_str::<BackupTemplate>(&data)
+                                    if
+                                        let Ok(template) = serde_json::from_str::<BackupTemplate>(
+                                            &data
+                                        )
                                     {
                                         let mut valid = Vec::new();
                                         let mut skipped = Vec::new();
@@ -443,8 +519,10 @@ impl eframe::App for GUIApp {
                     ui.add_sized(btn_size, egui::Button::new("Save Template"))
                         .clicked()
                         .then(|| {
-                            if let Some(path) =
-                                FileDialog::new().add_filter("JSON", &["json"]).save_file()
+                            if
+                                let Some(path) = FileDialog::new()
+                                    .add_filter("JSON", &["json"])
+                                    .save_file()
                             {
                                 let template = BackupTemplate {
                                     paths: self.selected_folders.clone(),
@@ -464,15 +542,18 @@ impl eframe::App for GUIApp {
                     ui.add_sized(btn_size, egui::Button::new("Edit Template"))
                         .clicked()
                         .then(|| {
-                            if let Some(path) =
-                                FileDialog::new().add_filter("JSON", &["json"]).pick_file()
+                            if
+                                let Some(path) = FileDialog::new()
+                                    .add_filter("JSON", &["json"])
+                                    .pick_file()
                             {
                                 if let Ok(data) = fs::read_to_string(&path) {
-                                    if let Ok(template) =
-                                        serde_json::from_str::<BackupTemplate>(&data)
+                                    if
+                                        let Ok(template) = serde_json::from_str::<BackupTemplate>(
+                                            &data
+                                        )
                                     {
-                                        self.template_paths = template
-                                            .paths
+                                        self.template_paths = template.paths
                                             .into_iter()
                                             .map(|p| fix_skip(&p).unwrap_or(p))
                                             .collect();
@@ -502,15 +583,21 @@ impl eframe::App for GUIApp {
 
                             *status.lock().unwrap() = "Packing into .tar".into();
 
+                            let progress = Progress::default();
+                            self.backup_progress = Some(progress.clone());
+
                             thread::spawn(move || {
-                                if let Some(out_dir) = FileDialog::new()
-                                    .set_title("Choose backup destination")
-                                    .pick_folder()
+                                if
+                                    let Some(out_dir) = FileDialog::new()
+                                        .set_title("Choose backup destination")
+                                        .pick_folder()
                                 {
-                                    match backup_gui(&folders, &out_dir) {
+                                    match backup_gui(&folders, &out_dir, &progress) {
                                         Ok(path) => {
-                                            *status.lock().unwrap() =
-                                                format!("✅ Backup created:\n{}", path.display());
+                                            *status.lock().unwrap() = format!(
+                                                "✅ Backup created:\n{}",
+                                                path.display()
+                                            );
                                         }
                                         Err(e) => {
                                             *status.lock().unwrap() =
@@ -528,62 +615,64 @@ impl eframe::App for GUIApp {
                         .then(|| {
                             let status = self.status.clone();
 
-                            *status.lock().unwrap() = "Starting restore...".into();
-
-                            if let Some(zip_file) =
-                                FileDialog::new().add_filter("tar", &["tar"]).pick_file()
+                            if
+                                let Some(zip_file) = FileDialog::new()
+                                    .add_filter("tar", &["tar"])
+                                    .pick_file()
                             {
-                                match parse_fingerprint(&zip_file) {
-                                    Ok((entries, map)) => {
-                                        self.restore_zip_path = Some(zip_file.clone());
-                                        self.saved_path_map = Some(map.clone()); // ← store it
-                                        self.restore_tree = build_human_tree(entries, map);
-                                        // Walk the entire tree and set every `checked = true`
-                                        fn check_all(node: &mut FolderTreeNode) {
-                                            node.checked = true;
-                                            for child in node.children.values_mut() {
-                                                check_all(child);
-                                            }
-                                        }
-                                        check_all(&mut self.restore_tree);
-                                        self.restore_editor = true;
-                                    }
-                                    Err(e) => {
-                                        *self.status.lock().unwrap() =
-                                            format!("Failed to read backup: {}", e);
-                                    }
-                                }
-                            }
+                                // show spinner right away
+                                self.restore_opening = true;
+                                *status.lock().unwrap() = "Opening archive…".into();
 
-                            // commented out for now in case of emergency, this may be added back.
-                            // this is just old logic and if everything will work as intented then
-                            // this may be left commented out or deleted complete
-                            //
-                            //thread::spawn(move || {
-                            //    if
-                            //        let Some(zip_file) = FileDialog::new()
-                            //            .add_filter("zip", &["zip"])
-                            //            .pick_file()
-                            //    {
-                            //        match restore_backup(&zip_file) {
-                            //            Ok(_) => {
-                            //                *status.lock().unwrap() = "✅ Restore complete.".into();
-                            //            }
-                            //            Err(e) => {
-                            //                *status.lock().unwrap() =
-                            //                    format!("❌ Restore failed: {}", e);
-                            //            }
-                            //        }
-                            //    } else {
-                            //        *status.lock().unwrap() = "❌ No file chosen.".into();
-                            //    }
-                            //});
+                                // prepare a one-shot channel
+                                // create a channel of the *new* type
+                                let (tx, rx) = mpsc::channel::<RestoreMsg>();
+                                self.restore_rx = Some(rx);
+
+                                thread::spawn(move || {
+                                    let result: RestoreMsg = parse_fingerprint(&zip_file).and_then(
+                                        |(entries, map)| {
+                                            Ok((build_human_tree(entries, map), zip_file.clone()))
+                                        }
+                                    );
+                                    let _ = tx.send(result);
+                                });
+                            }
                         });
                 });
             });
 
-            ui.separator();
-            ui.label(&*self.status.lock().unwrap());
+            if self.restore_opening {
+                ui.horizontal(|ui| {
+                    ui.add(egui::Spinner::new().size(16.0)); // 16 px is default
+                    ui.label("Opening archive…");
+                });
+                ctx.request_repaint_after(std::time::Duration::from_millis(30));
+            }
+
+            for opt in [&mut self.backup_progress, &mut self.restore_progress] {
+                if let Some(p) = opt {
+                    let pct = p.get(); // 0‥101   (101 == done)
+                    match p.get() {
+                        0..=100 => {
+                            ui.add(
+                                egui::ProgressBar
+                                    ::new((p.get() as f32) / 100.0)
+                                    .fill(egui::Color32::from_rgb(80, 160, 240))
+                                    .desired_height(6.0)
+                                    .animate(true)
+                                    .desired_width(ui.available_width())
+                            );
+                            ui.add_space(1.0);
+                            ui.label(format!("{pct}%"));
+                            ctx.request_repaint_after(std::time::Duration::from_millis(4));
+                        }
+                        _ => {
+                            *opt = None;
+                        }
+                    }
+                }
+            }
         });
 
         ctx.request_repaint_after(std::time::Duration::from_millis(500));
