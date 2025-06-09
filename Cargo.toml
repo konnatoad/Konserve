@@ -1,5 +1,5 @@
 [package]
-name = "kafkaBackup"
+name = "Konserve"
 version = "0.1.5"
 edition = "2024"
 build = "build.rs"
@@ -25,4 +25,3 @@ strip = true
 
 [profile.dev]
 panic = "unwind"
-

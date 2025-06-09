@@ -219,7 +219,7 @@ fn main() -> Result<(), eframe::Error> {
 
     println!("[DEBUG] Launching GUI with run_native");
     eframe::run_native(
-        "VanManen Backup Tool",
+        "Konserve",
         options,
         Box::new(|_cc| {
             println!("[DEBUG] GUIApp::default() instantiated");
@@ -288,7 +288,7 @@ impl eframe::App for GUIApp {
                 self.restore_rx = None;
             }
 
-            ui.heading("VanManen Backup Tool");
+            ui.heading("Konserve");
             ui.separator();
 
             if self.restore_editor {
