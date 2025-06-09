@@ -630,9 +630,9 @@ impl eframe::App for GUIApp {
                                 self.restore_rx = Some(rx);
 
                                 thread::spawn(move || {
-                                    let result: RestoreMsg = parse_fingerprint(&zip_file).and_then(
+                                    let result: RestoreMsg = parse_fingerprint(&zip_file).map(
                                         |(entries, map)| {
-                                            Ok((build_human_tree(entries, map), zip_file.clone()))
+                                            (build_human_tree(entries, map), zip_file.clone())
                                         }
                                     );
                                     let _ = tx.send(result);
@@ -650,8 +650,11 @@ impl eframe::App for GUIApp {
                 ctx.request_repaint_after(std::time::Duration::from_millis(30));
             }
 
-            for opt in [&mut self.backup_progress, &mut self.restore_progress] {
-                if let Some(p) = opt {
+            for opt in [&mut self.backup_progress, &mut self.restore_progress]
+                .into_iter()
+                .enumerate() {
+                let (i, p_opt) = opt;
+                if let Some(p) = p_opt {
                     let pct = p.get(); // 0‥101   (101 == done)
                     match p.get() {
                         0..=100 => {
@@ -665,10 +668,17 @@ impl eframe::App for GUIApp {
                             );
                             ui.add_space(1.0);
                             ui.label(format!("{pct}%"));
+                            ui.add_space(1.0);
+                            let progress_status = if i == 0 {
+                                "Backing up..."
+                            } else {
+                                "Restoring..."
+                            };
+                            ui.label(progress_status);
                             ctx.request_repaint_after(std::time::Duration::from_millis(4));
                         }
                         _ => {
-                            *opt = None;
+                            *p_opt = None;
                         }
                     }
                 }
