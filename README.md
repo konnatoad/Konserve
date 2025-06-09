@@ -2,11 +2,11 @@
 
 A simple GUI backup utility for Windows, designed to help you **back up** important folders or files and **restore them** later—even on a different machine or user account.
 
-> ✔ Portable backups with timestamped TARs
-> ✔ Embedded build-time fingerprint
-> ✔ Template support
-> ✔ Partial restore with visual tree selection & progress
-> ✔ Smart path correction across Windows users
+> ✔ Portable backups with timestamped TARs  
+> ✔ Embedded build-time fingerprint  
+> ✔ Template support  
+> ✔ Partial restore with visual tree selection & progress   
+> ✔ Smart path correction across Windows users   
 
 ---
 
