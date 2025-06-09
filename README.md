@@ -1,4 +1,4 @@
-# VanManen Backup Tool
+# Konserve
 
 A simple GUI backup utility for Windows, designed to help you **back up** important folders or files and **restore them** later—even on a different machine or user account.
 
@@ -88,7 +88,7 @@ cargo build --release
 Your executable will be:
 
 ```
-target/release/kafkaBackup.exe
+target/release/Konserve.exe
 ```
 
 ---
