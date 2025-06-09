@@ -67,7 +67,7 @@ This allows seamless migration between machines or profiles.
 
 ---
 
-## Build & Release
+## Building
 
 ### Prerequisites
 
@@ -92,15 +92,14 @@ target/release/Konserve.exe
 
 ---
 
-## Documentation
-
-See the full documentation in the [GitHub Wiki](https://github.com/konnatoad/Konserve/wiki).
-
----
-
 # Credits
 
 *Maintained and developed by [@konnatoad](https://github.com/konnatoad)*
 
 Special thanks to [@seshues](https://github.com/seshues) for feedback, ideas and input.
 
+---
+
+## Documentation
+
+See the full documentation in the [GitHub Wiki](https://github.com/konnatoad/Konserve/wiki).
