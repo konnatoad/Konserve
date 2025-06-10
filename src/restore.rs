@@ -1,10 +1,10 @@
-use crate::helpers::{ Progress, adjust_path, get_fingered };
+use crate::helpers::{Progress, adjust_path, get_fingered};
 use std::{
-    collections::{ HashMap, HashSet },
-    fs::{ self, File },
+    collections::{HashMap, HashSet},
+    fs::{self, File},
     io::Read,
-    path::{ Path, PathBuf },
-    sync::{ Arc, Mutex },
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
 };
 use tar::Archive;
 
@@ -17,7 +17,7 @@ pub fn restore_backup(
     zip_path: &PathBuf,
     selected: Option<Vec<String>>,
     status: Arc<Mutex<String>>,
-    progress: &Progress
+    progress: &Progress,
 ) -> Result<(), String> {
     *status.lock().unwrap() = "Restoring backup…".into();
 
@@ -79,8 +79,7 @@ pub fn restore_backup(
 
     let total_files: u32 = {
         let mut arc = Archive::new(File::open(zip_path).map_err(|e| e.to_string())?);
-        arc
-            .entries()
+        arc.entries()
             .map_err(|e| e.to_string())?
             .filter_map(Result::ok)
             .filter(|e| {
@@ -127,7 +126,12 @@ pub fn restore_backup(
         }
 
         let tar_path = Path::new(&path_in_tar);
-        let root_component = tar_path.components().next().unwrap().as_os_str().to_string_lossy();
+        let root_component = tar_path
+            .components()
+            .next()
+            .unwrap()
+            .as_os_str()
+            .to_string_lossy();
 
         if let Some(orig_base) = path_map.get(&root_component.to_string()) {
             let adjusted_base = adjust_path(orig_base, &current_home);
