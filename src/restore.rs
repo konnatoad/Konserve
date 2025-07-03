@@ -58,7 +58,7 @@ pub fn restore_backup(
         for (uuid, orig) in &path_map {
             let parent_c = canon(orig.parent().unwrap_or(orig).display().to_string());
             let item_name = orig.file_name().unwrap().to_string_lossy();
-            let base = format!("{}/{}", parent_c, item_name);
+            let base = format!("{parent_c}/{item_name}");
 
             if human_sel.contains(&base) {
                 to_extract.insert(uuid.clone());
@@ -69,9 +69,9 @@ pub fn restore_backup(
             }
 
             for h in &human_sel {
-                let base_slash = format!("{}/", base);
+                let base_slash = format!("{base}/");
                 if let Some(rest) = h.strip_prefix(&base_slash) {
-                    to_extract.insert(format!("{uuid}/{}", rest));
+                    to_extract.insert(format!("{uuid}/{rest}"));
                 }
             }
         }

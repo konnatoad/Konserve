@@ -56,7 +56,7 @@ pub fn load_icon_image() -> Arc<IconData> {
         .into_rgba8();
 
     let (w, h) = image.dimensions();
-    println!("[DEBUG] Icon dimensions: {}x{}", w, h);
+    println!("[DEBUG] Icon dimensions: {w}x{h}");
 
     let icon_data = Arc::new(IconData {
         rgba: image.into_raw(),
@@ -126,7 +126,7 @@ pub fn build_human_tree(
     let mut root = FolderTreeNode::default();
 
     for (uuid, original_path) in path_map {
-        println!("[DEBUG] Processing UUID: {uuid}, Path: {:?}", original_path);
+      println!("[DEBUG] Processing UUID: {uuid}, Path: {original_path:?}");
 
         let parent_label = original_path
             .parent()
@@ -195,10 +195,7 @@ pub fn collect_recursive(node: &FolderTreeNode, path: &mut Vec<String>, output: 
         path.push(name.clone());
         if child.is_file && child.checked {
             let full_path = path.join("/");
-            println!(
-                "[DEBUG] collect_recursive: Adding checked file {}",
-                full_path
-            );
+            println!("[DEBUG] collect_recursive: Adding checked file {full_path}");
             output.push(full_path);
         }
 
@@ -263,7 +260,7 @@ pub fn parse_fingerprint(
 
         if entry_name != "fingerprint.txt" {
             entries.push(entry_name.clone());
-            println!("[DEBUG]   Found entry: {}", entry_name);
+            println!("[DEBUG]   Found entry: {entry_name}");
         }
     }
 
@@ -281,13 +278,12 @@ pub fn get_fingered() -> &'static str {
 
     match option_env!("FINGERPRINT") {
         Some(val) => {
-            println!("get_fingered: using embedded fingerprint = \"{}\"", val);
+            println!("get_fingered: using embedded fingerprint = \"{val}\"");
             val
         }
         None => {
             println!(
-                "get_fingered: no embedded fingerprint found, fallback \"{}\"",
-                DEFAULT
+                "get_fingered: no embedded fingerprint found, fallback \"{DEFAULT}\""
             );
             DEFAULT
         }
@@ -298,20 +294,20 @@ pub fn adjust_path(original: &Path, current_home: &Path) -> PathBuf {
     let og_str = original.to_string_lossy();
     let current_str = current_home.to_string_lossy();
 
-    println!("[DEBUG] adjust_path: original = {}", og_str);
-    println!("[DEBUG] adjust_path: current_home = {}", current_str);
+    println!("[DEBUG] adjust_path: original = {og_str}");
+    println!("[DEBUG] adjust_path: current_home = {current_str}");
 
     if og_str.to_lowercase().starts_with("c:\\users\\") {
         let parts: Vec<&str> = og_str.split('\\').collect();
         if parts.len() > 2 {
             let old_username = parts[2];
-            let expected_prefix = format!("C:\\Users\\{}", old_username);
-            println!("[DEBUG] Detected old user prefix: {}", expected_prefix);
+            let expected_prefix = format!("C:\\Users\\{old_username}");
+            println!("[DEBUG] Detected old user prefix: {expected_prefix}");
 
             if og_str.starts_with(&expected_prefix) {
                 let rel_path = og_str.strip_prefix(&expected_prefix).unwrap_or("");
-                let adjusted = format!("{}{}", current_str, rel_path);
-                println!("[DEBUG] Path adjusted: {} → {}", og_str, adjusted);
+                let adjusted = format!("{current_str}{rel_path}");
+                println!("[DEBUG] Path adjusted: {og_str} → {adjusted}");
                 return PathBuf::from(adjusted);
             }
         }

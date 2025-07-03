@@ -12,7 +12,7 @@ fn embed_fingerprint() {
         {
             println!("cargo:rustc-env={KEY}={val}");
             println!("cargo:rerun-if-changed={}", env_path.display());
-            println!("cargo:warning=build.rs saw FINGERPRINT=\"{}\"", val);
+            println!("cargo:warning=build.rs saw FINGERPRINT=\"{val}\"");
         }
     }
 }

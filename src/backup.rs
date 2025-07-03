@@ -25,7 +25,7 @@ pub fn backup_gui(
     println!("[DEBUG] Output directory: {}", output_dir.display());
 
     let timestamp = Local::now().format("%Y-%m-%d_%H-%M-%S");
-    let zip_name = format!("backup_{}.tar", timestamp);
+    let zip_name = format!("backup_{timestamp}.tar");
     let zip_path = output_dir.join(&zip_name);
     println!("[DEBUG] Creating backup archive: {}", zip_path.display());
 
@@ -86,10 +86,10 @@ pub fn backup_gui(
             let mut f = File::open(original_path).map_err(|e| e.to_string())?;
 
             let entry_name = match original_path.extension().and_then(|e| e.to_str()) {
-                Some(ext) => format!("{}.{}", uuid, ext),
+                Some(ext) => format!("{uuid}.{ext}"),
                 None => uuid.to_string(),
             };
-            println!("[DEBUG] -> Entry name in tar: {}", entry_name);
+            println!("[DEBUG] -> Entry name in tar: {entry_name}");
 
             tar_builder
                 .append_data(&mut header, entry_name, &mut f)

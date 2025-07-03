@@ -195,7 +195,7 @@ impl eframe::App for GUIApp {
                             if let Err(e) =
                                 restore_backup(&zip_path, Some(selected), status.clone(), &progress)
                             {
-                                *status.lock().unwrap() = format!("❌ Restore failed: {}", e);
+                                *status.lock().unwrap() = format!("❌ Restore failed: {e}");
                             }
                         });
 
@@ -458,7 +458,7 @@ impl eframe::App for GUIApp {
                                         }
                                         Err(e) => {
                                             *status.lock().unwrap() =
-                                                format!("❌ Backup failed: {}", e);
+                                                format!("❌ Backup failed: {e}");
                                         }
                                     }
                                 } else {
