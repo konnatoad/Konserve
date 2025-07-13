@@ -1,4 +1,4 @@
-use crate::helpers::{Progress, adjust_path, get_fingered};
+use crate::helpers::{adjust_path, get_fingered, Progress};
 use std::{
     collections::{HashMap, HashSet},
     fs::{self, File},
