@@ -16,15 +16,18 @@ jobs:
       contents: read
       security-events: write
       actions: read
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: rust-lang/setup-rust@v1
+        uses: actions/setup-rust@v1
         with:
           rust-version: stable
-          components: clippy
+
+      - name: Add Clippy component
+        run: rustup component add clippy
 
       - name: Install required cargo utilities
         run: cargo install clippy-sarif sarif-fmt
