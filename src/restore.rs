@@ -1,4 +1,4 @@
-use crate::helpers::{adjust_path, get_fingered, Progress};
+use crate::helpers::{Progress, adjust_path, get_fingered};
 use std::{
     collections::{HashMap, HashSet},
     fs::{self, File},
@@ -13,6 +13,8 @@ fn canon<S: AsRef<str>>(s: S) -> String {
     s.as_ref().replace('\\', "/")
 }
 
+// === Restore Backup Logic ===
+
 pub fn restore_backup(
     zip_path: &PathBuf,
     selected: Option<Vec<String>>,
@@ -21,10 +23,12 @@ pub fn restore_backup(
 ) -> Result<(), String> {
     *status.lock().unwrap() = "Restoring backup…".into();
 
+    // --- Open archive and initialize path map ---
     let mut archive = Archive::new(File::open(zip_path).map_err(|e| e.to_string())?);
     let mut path_map: HashMap<String, PathBuf> = HashMap::new();
     let mut valid_fingerprint = false;
 
+    // --- Scan archive for fingerprint.txt and validate ---
     for entry_res in archive.entries().map_err(|e| e.to_string())? {
         let mut entry = entry_res.map_err(|e| e.to_string())?;
         let header_path = entry.path().map_err(|e| e.to_string())?;
@@ -36,6 +40,8 @@ pub fn restore_backup(
 
             if txt.contains(get_fingered()) {
                 valid_fingerprint = true;
+
+                // --- Parse each line in fingerprint and map UUID → path ---
                 for line in txt.lines().filter(|l| l.contains(": ")) {
                     let (uuid, p) = line.split_once(": ").unwrap();
                     path_map.insert(uuid.to_string(), PathBuf::from(p.trim()));
@@ -44,12 +50,15 @@ pub fn restore_backup(
             break;
         }
     }
+
+    // --- Check fingerprint result ---
     if !valid_fingerprint {
         return Err("Invalid backup fingerprint.".into());
     }
 
     println!("[fingerprint] loaded, {} uuids", path_map.len());
 
+    // === Collect Selected Paths ===
     let mut to_extract: HashSet<String> = HashSet::new();
 
     if let Some(human_sel_raw) = &selected {
@@ -60,14 +69,17 @@ pub fn restore_backup(
             let item_name = orig.file_name().unwrap().to_string_lossy();
             let base = format!("{parent_c}/{item_name}");
 
+            // Match direct selection
             if human_sel.contains(&base) {
                 to_extract.insert(uuid.clone());
 
+                // Match file with extension too (e.g., uuid.jpg)
                 if let Some(ext) = orig.extension().and_then(|e| e.to_str()) {
                     to_extract.insert(format!("{uuid}.{ext}"));
                 }
             }
 
+            // Match folder contents
             for h in &human_sel {
                 let base_slash = format!("{base}/");
                 if let Some(rest) = h.strip_prefix(&base_slash) {
@@ -77,6 +89,7 @@ pub fn restore_backup(
         }
     }
 
+    // === Count Files for Progress Bar ===
     let total_files: u32 = {
         let mut arc = Archive::new(File::open(zip_path).map_err(|e| e.to_string())?);
         arc.entries()
@@ -106,25 +119,30 @@ pub fn restore_backup(
 
     println!("[select]  to_extract = {to_extract:?}");
 
+    // === Begin Extraction ===
     let current_home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("C:\\"));
     let mut archive = Archive::new(File::open(zip_path).map_err(|e| e.to_string())?);
 
     println!("[extract] scanning archive…");
     let mut restored_count = 0;
 
+    // === Extract Files ===
     for entry_res in archive.entries().map_err(|e| e.to_string())? {
         let mut entry = entry_res.map_err(|e| e.to_string())?;
         let tar_path_ref = entry.path().map_err(|e| e.to_string())?;
         let path_in_tar = tar_path_ref.to_string_lossy().into_owned();
 
+        // Skip fingerprint file
         if path_in_tar == "fingerprint.txt" {
             continue;
         }
+        // Skip if not selected
         if selected.is_some() && !to_extract.contains(&path_in_tar) {
             println!("[skip]    {path_in_tar}  (not selected)");
             continue;
         }
 
+        // Extract tar path and identify the root UUID
         let tar_path = Path::new(&path_in_tar);
         let root_component = tar_path
             .components()
@@ -133,6 +151,7 @@ pub fn restore_backup(
             .as_os_str()
             .to_string_lossy();
 
+        // === Case 1: UUID directory (nested contents) ===
         if let Some(orig_base) = path_map.get(&root_component.to_string()) {
             let adjusted_base = adjust_path(orig_base, &current_home);
             let rel = tar_path
@@ -149,7 +168,9 @@ pub fn restore_backup(
             restored_count += 1;
             done += 1;
             progress.set((done * 100) / total_files);
-        } else if let Some((uuid_part, _ext)) = root_component.split_once('.') {
+        }
+        // === Case 2: UUID.extension (single file) ===
+        else if let Some((uuid_part, _ext)) = root_component.split_once('.') {
             if let Some(orig_file) = path_map.get(uuid_part) {
                 let unpack_to = adjust_path(orig_file, &current_home);
                 println!("[write] file {path_in_tar}  →  {}", unpack_to.display());
@@ -164,11 +185,14 @@ pub fn restore_backup(
             } else {
                 println!("[skip]    {path_in_tar}  (uuid not in map)");
             }
-        } else {
+        }
+        // === Case 3: Unhandled path ===
+        else {
             println!("[skip]    {path_in_tar}  (no handler)");
         }
     }
 
+    // === Done ===
     println!("[done]   restored {restored_count} entries");
     *status.lock().unwrap() = "✅ Restore complete.".into();
     progress.done();
