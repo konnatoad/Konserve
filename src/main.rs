@@ -157,7 +157,7 @@ impl Default for GUIApp {
 impl eframe::App for GUIApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            // Tabs to switch between Home and Settings
+           // === Tabs ===
             ui.horizontal(|ui| {
                 if ui
                     .selectable_label(self.tab == MainTab::Home, "Home")
@@ -178,14 +178,14 @@ impl eframe::App for GUIApp {
 
                 ui.add_space(4.0);
 
-                // Display current template paths
+               // === Template Path Editor ===
                 egui::ScrollArea::vertical()
                     .max_height(285.0)
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         let mut to_remove = None;
 
-                        // Render each path with a text edit, browse button, and remove button
+                       // --- Path Rows ---
                         for (i, path) in self.template_paths.iter_mut().enumerate() {
                             let mut path_str = path.display().to_string();
 
@@ -232,7 +232,7 @@ impl eframe::App for GUIApp {
                         let tpl = BackupTemplate {
                             paths: self.template_paths.clone(),
                         };
-                        // Serialize the template to JSON
+                       // --- Save to JSON ---
                         match serde_json::to_string_pretty(&tpl) {
                             Ok(json) => {
                                 if fs::write(&path, json).is_ok() {
@@ -262,7 +262,7 @@ impl eframe::App for GUIApp {
 
                 ui.add_space(4.0);
 
-                // Display the current restore zip path
+               // === Restore Tree ===
                 egui::ScrollArea::vertical()
                     .max_height(300.0)
                     .show(ui, |ui| {
@@ -311,7 +311,7 @@ impl eframe::App for GUIApp {
                     if let Some(finished_msg) =
                         self.restore_rx.as_ref().and_then(|rx| rx.try_recv().ok())
                     {
-                        // Handle the result of the restore operation
+                       // === Restore Result Handling ===
                         match finished_msg {
                             Ok((mut tree, zip)) => {
                                 // NEW: mark everything checked
@@ -358,7 +358,7 @@ impl eframe::App for GUIApp {
                     if !self.selected_folders.is_empty() {
                         ui.add_space(4.0);
 
-                        // Display the selected folders with a scroll area
+                       // === Selected Items List ===
                         // This will allow users to see all selected folders
                         let mut to_remove = None;
                         egui::ScrollArea::vertical()
@@ -377,7 +377,7 @@ impl eframe::App for GUIApp {
 
                         ui.add_space(4.0);
 
-                        // Clear All button to remove all selected folders
+                       // --- Clear Selection ---
                         if ui.button("Clear All").clicked() {
                             self.selected_folders.clear();
                         }
@@ -439,12 +439,12 @@ impl eframe::App for GUIApp {
                                     if let Some(path) =
                                         FileDialog::new().add_filter("JSON", &["json"]).save_file()
                                     {
-                                        // Create a BackupTemplate with the selected folders
+                                       // --- Build Template Struct ---
                                         let template = BackupTemplate {
                                             paths: self.selected_folders.clone(),
                                         };
 
-                                        // Serialize the template to JSON and write it to the file
+                                       // --- Save to JSON ---
                                         if let Ok(json) = serde_json::to_string_pretty(&template) {
                                             if fs::write(&path, json).is_ok() {
                                                 *self.status.lock().unwrap() =
@@ -457,7 +457,7 @@ impl eframe::App for GUIApp {
                                     }
                                 });
                         });
-                        // Backup and Restore buttons
+                       // === Backup / Restore Buttons ===
                         ui.vertical(|ui| {
                             let btn_size = egui::vec2(95.0, 17.0);
                             // Create Backup button
@@ -550,7 +550,7 @@ impl eframe::App for GUIApp {
                     {
                         let (i, p_opt) = opt;
                         if let Some(p) = p_opt {
-                            let pct = p.get(); // 0‥101   (101 == done)
+                            let pct = p.get(); // 101 = done
                             match p.get() {
                                 0..=100 => {
                                     // Show progress bar and percentage
@@ -593,12 +593,12 @@ impl eframe::App for GUIApp {
                             if let Some(path) =
                                 FileDialog::new().add_filter("JSON", &["json"]).pick_file()
                             {
-                                // Read the template file
+                               // --- Load Template File ---
                                 if let Ok(data) = fs::read_to_string(&path) {
                                     if let Ok(template) =
                                         serde_json::from_str::<BackupTemplate>(&data)
                                     {
-                                        // If the template is valid, set the paths and open the editor
+                                       // --- Parse & Open Editor ---
                                         self.template_paths = template
                                             .paths
                                             .into_iter()
@@ -675,14 +675,12 @@ impl eframe::App for GUIApp {
                         }
                     });
 
-                    // --- Logic wiring goes here ---
+                    // === Wiring Placeholder ===
                     // When logic is implemented (in helpers.rs),
                     // use self.default_backup_location in your backup functions.
 
-                    // If saving / loading config, call your helpers for
+                    // --- Save/Load Config ---
                     // serialization/deserialization
-
-                    // ---
 
                     let should_update = match &self.default_backup_location {
                         Some(p) => loc_str != p.display().to_string(),
