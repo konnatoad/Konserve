@@ -14,6 +14,16 @@ use std::{
 };
 use tar::Archive;
 
+// Represents the mode for resolving conflicts during file operations.
+#[derive(PartialEq, Eq, Clone, Copy, Default)]
+pub enum ConflictResolutionMode {
+    #[default]
+    Prompt,
+    Overwrite,
+    Skip,
+    Rename,
+}
+
 // Represents different levels of compression for file operations.
 #[derive(Default, PartialEq, Eq, Clone, Copy)]
 pub enum CompressionLevel {
