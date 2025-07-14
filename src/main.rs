@@ -6,6 +6,7 @@ mod restore;
 
 use backup::backup_gui;
 use helpers::CompressionLevel;
+use helpers::ConflictResolutionMode;
 use helpers::Progress;
 use helpers::build_human_tree;
 use helpers::collect_paths;
@@ -127,6 +128,8 @@ struct GUIApp {
     compression_enabled: bool,
     compression_level: CompressionLevel,
     default_backup_location: Option<PathBuf>,
+    conflict_resolution_enabled: bool,
+    conflict_resolution_mode: ConflictResolutionMode,
 }
 
 // Implement the Default trait for GUIApp to initialize the application state
@@ -149,6 +152,8 @@ impl Default for GUIApp {
             compression_enabled: false,
             compression_level: CompressionLevel::Normal,
             default_backup_location: None,
+            conflict_resolution_enabled: false,
+            conflict_resolution_mode: ConflictResolutionMode::default(),
         }
     }
 }
@@ -648,6 +653,43 @@ impl eframe::App for GUIApp {
                         .as_ref()
                         .map(|p| p.display().to_string())
                         .unwrap_or_default();
+
+                    ui.checkbox(
+                        &mut self.conflict_resolution_enabled,
+                        "Enable Conflict Resolution Mode (WIP)",
+                    );
+
+                    if self.conflict_resolution_enabled {
+                        egui::ComboBox::from_label("Conflict resolution mode (WIP)")
+                            .selected_text(match self.conflict_resolution_mode {
+                                ConflictResolutionMode::Prompt => "Prompt",
+                                ConflictResolutionMode::Overwrite => "Overwrite",
+                                ConflictResolutionMode::Skip => "Skip",
+                                ConflictResolutionMode::Rename => "Rename",
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut self.conflict_resolution_mode,
+                                    ConflictResolutionMode::Prompt,
+                                    "Prompt",
+                                );
+                                ui.selectable_value(
+                                    &mut self.conflict_resolution_mode,
+                                    ConflictResolutionMode::Overwrite,
+                                    "Overwrite",
+                                );
+                                ui.selectable_value(
+                                    &mut self.conflict_resolution_mode,
+                                    ConflictResolutionMode::Skip,
+                                    "Skip",
+                                );
+                                ui.selectable_value(
+                                    &mut self.conflict_resolution_mode,
+                                    ConflictResolutionMode::Rename,
+                                    "Rename",
+                                );
+                            });
+                    }
 
                     ui.separator();
 
