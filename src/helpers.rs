@@ -14,17 +14,18 @@ use std::{
 };
 use tar::Archive;
 
-// Represents the mode for resolving conflicts during file operations.
+// Describes how to resolve name collisions during restore.
+// Used when two files would overwirte each other.
 #[derive(PartialEq, Eq, Clone, Copy, Default)]
 pub enum ConflictResolutionMode {
     #[default]
-    Prompt,
-    Overwrite,
-    Skip,
-    Rename,
+    Prompt, // Ask user
+    Overwrite, // Overwrite destination
+    Skip,      // Skip conflicting file
+    Rename,    // Rename on conflict
 }
 
-// Represents different levels of compression for file operations.
+// Selectable  compression tiers for backup
 #[derive(Default, PartialEq, Eq, Clone, Copy)]
 pub enum CompressionLevel {
     Fast,
@@ -33,13 +34,12 @@ pub enum CompressionLevel {
     Maximum,
 }
 
-// Represents the progress of an operation, such as loading or processing data.
+// Atomic progress counter
 #[derive(Clone)]
 pub struct Progress {
     inner: Arc<AtomicU32>,
 }
 
-// Represents a node in the folder tree structure.
 impl Progress {
     pub fn new() -> Self {
         Self {
@@ -47,44 +47,38 @@ impl Progress {
         }
     }
 
-    // Creates a new Progress instance with an initial value of 0.
     pub fn set(&self, pct: u32) {
+        // Used relaxed ordering, as exact timing isn't critical
         self.inner.store(pct, Ordering::Relaxed);
     }
-    // Sets the progress to a specific percentage.
     pub fn get(&self) -> u32 {
         self.inner.load(Ordering::Relaxed)
     }
-    // Retrieves the current progress percentage.
     pub fn done(&self) {
         self.set(101);
     }
 }
-// Marks the progress as done by setting it to 101.
 impl Default for Progress {
     fn default() -> Self {
         Self::new()
     }
 }
 
-// if !icon.png exists, it will panic at runtime
+// Loads the application icon into memory for GUI window setup
+// Fails hard if the icon file is missing or malformed
 pub fn load_icon_image() -> Arc<IconData> {
     println!("[DEBUG] load_icon_image: Start");
 
-    // Load the icon image from the embedded bytes.
     let image_bytes = include_bytes!("../assets/icon.png");
     println!("[DEBUG] Icon bytes loaded: {} bytes", image_bytes.len());
 
-    // Decode the image bytes into an RGBA image.
     let image = image::load_from_memory(image_bytes)
         .expect("Icon image couldn't be loaded")
         .into_rgba8();
 
-    // Check the dimensions of the image.
     let (w, h) = image.dimensions();
     println!("[DEBUG] Icon dimensions: {w}x{h}");
 
-    // Create an IconData instance with the image data and dimensions.
     let icon_data = Arc::new(IconData {
         rgba: image.into_raw(),
         width: w,
@@ -95,7 +89,8 @@ pub fn load_icon_image() -> Arc<IconData> {
     icon_data
 }
 
-// Sets the checked state of a node and all its children recursively.
+// Recursively toggles all children to match parent checkbox state.
+// Used when user checks/unchecks a parent folder node.
 fn set_all_checked(node: &mut FolderTreeNode, checked: bool) {
     println!(
         "[DEBUG] set_all_checked: Setting node (is_file: {}) to checked = {}",
@@ -109,11 +104,11 @@ fn set_all_checked(node: &mut FolderTreeNode, checked: bool) {
     }
 }
 
-// Renders a tree structure in the UI, allowing for nested folders and files.
+// Recursive GUI renderer for folder/file tree used during selective restore
+// - Renders fikders as collapsible nodes
+// - Ensures UI keeps parent/children checkbox sync
 pub fn render_tree(ui: &mut egui::Ui, path: &mut Vec<String>, node: &mut FolderTreeNode) {
-    // Render the current node's children in the UI.
     for (name, child) in node.children.iter_mut() {
-        // Create a label for the current node, appending a slash if it's a directory.
         let mut label = name.clone();
         if !child.is_file {
             label.push('/');
@@ -123,16 +118,15 @@ pub fn render_tree(ui: &mut egui::Ui, path: &mut Vec<String>, node: &mut FolderT
         let current_path = path.join("/");
 
         if child.children.is_empty() {
-            // If the node has no children, render a checkbox for it.
+            // Leaf file node
             ui.horizontal(|ui| {
                 ui.checkbox(&mut child.checked, "");
                 ui.label(label);
             });
         } else {
-            // If the node has children, render a collapsible header with a checkbox.
+            // Folder node with children
             ui.horizontal(|ui| {
                 if ui.checkbox(&mut child.checked, "").changed() {
-                    // If the checkbox state changes, set all children to the same state.
                     println!(
                         "[DEBUG] Checkbox changed: setting all children of \"{}\" to {}",
                         current_path, child.checked
@@ -146,6 +140,8 @@ pub fn render_tree(ui: &mut egui::Ui, path: &mut Vec<String>, node: &mut FolderT
                         render_tree(ui, path, child);
                     });
             });
+
+            // Maintain oarent state if any child is still checked
             child.checked = child.children.values().any(|c| c.checked);
         }
 
@@ -153,27 +149,24 @@ pub fn render_tree(ui: &mut egui::Ui, path: &mut Vec<String>, node: &mut FolderT
     }
 }
 
-// Builds a human-readable tree structure from a list of entries and a mapping of UUIDs to paths.
+// Constructs a FolderTreeNode hierarchy from archived entries and UUID to path mappings
+// Used to build the restore tree after parsing fingerprint.txt
 pub fn build_human_tree(
     entries: Vec<String>,
     path_map: HashMap<String, PathBuf>,
 ) -> FolderTreeNode {
-    // Builds a tree structure from the provided entries and path map.
     println!("[DEBUG] build_human_tree: Start");
     let mut root = FolderTreeNode::default();
 
     for (uuid, original_path) in path_map {
-        // For each UUID and its corresponding path, process the entry.
         println!("[DEBUG] Processing UUID: {uuid}, Path: {original_path:?}");
 
         let parent_label = original_path
-            // Get the parent directory of the original path.
             .parent()
             .unwrap_or(&original_path)
             .display()
             .to_string();
         let item_name = original_path
-            // Get the file name from the original path.
             .file_name()
             .unwrap()
             .to_string_lossy()
@@ -182,13 +175,11 @@ pub fn build_human_tree(
         println!("[DEBUG] parent_label = \"{parent_label}\", item_name = \"{item_name}\"");
 
         let parent_node = root
-            // Ensure the parent node exists in the tree.
             .children
             .entry(parent_label.clone())
             .or_insert_with(FolderTreeNode::default);
 
         parent_node
-            // Ensure the item node exists in the parent node's children.
             .children
             .entry(item_name.clone())
             .or_insert_with(FolderTreeNode::default);
@@ -197,17 +188,13 @@ pub fn build_human_tree(
         let is_dir_backup = entries.iter().any(|e| e.starts_with(&dir_prefix)); // Check if there are any entries that start with the UUID prefix.
 
         if is_dir_backup {
-            // If there are entries that start with the UUID prefix, treat it as a directory
-            // backup.
             println!("[DEBUG] Detected directory backup for UUID: {uuid}");
             parent_node.children.get_mut(&item_name).unwrap().is_file = false;
 
             for tar_path in entries.iter().filter(|e| e.starts_with(&dir_prefix)) {
-                // For each entry that starts with the UUID prefix, process it as a directory path.
                 println!("[DEBUG]   tar_path = \"{tar_path}\"");
 
                 let rest = tar_path[dir_prefix.len()..].trim_end_matches('/');
-                // Remove the UUID prefix and any trailing slashes.
                 if rest.is_empty() {
                     println!("[DEBUG]   Skipping empty rest after trim");
                     continue;
@@ -216,12 +203,9 @@ pub fn build_human_tree(
                 println!("[DEBUG]   Rest path: \"{rest}\"");
 
                 let mut cursor = parent_node.children.get_mut(&item_name).unwrap(); // Get the item
-                // node for the current UUID.
                 for part in rest.split('/') {
-                    // Split the rest path into parts and traverse the tree.
                     println!("[DEBUG]     Descending into part: \"{part}\"");
                     cursor = cursor
-                        // Ensure the cursor is mutable to modify the tree.
                         .children
                         .entry(part.to_string())
                         .or_insert_with(FolderTreeNode::default);
@@ -238,12 +222,11 @@ pub fn build_human_tree(
     root
 }
 
-// Recursively collects paths of checked files from the folder tree.
+// Walks tree and accumulates all checked file paths as flat strings
 pub fn collect_recursive(node: &FolderTreeNode, path: &mut Vec<String>, output: &mut Vec<String>) {
     for (name, child) in &node.children {
         path.push(name.clone());
         if child.is_file && child.checked {
-            // If the node is a file and checked, add its path to the output.
             let full_path = path.join("/");
             println!("[DEBUG] collect_recursive: Adding checked file {full_path}");
             output.push(full_path);
@@ -254,7 +237,6 @@ pub fn collect_recursive(node: &FolderTreeNode, path: &mut Vec<String>, output: 
     }
 }
 
-// Collects all paths of checked files from the folder tree into a vector.
 pub fn collect_paths(root: &FolderTreeNode) -> Vec<String> {
     println!("[DEBUG] collect_paths: Start");
     let mut result = Vec::new();
@@ -267,8 +249,9 @@ pub fn collect_paths(root: &FolderTreeNode) -> Vec<String> {
     result
 }
 
-// Parses a fingerprint file from a ZIP archive and returns a list of entries and a mapping of
-// UUIDs to paths.
+// Reads fingerprint.txt from a tar archive and extracts both:
+// UUID to path map
+// List of archived file entries excluding fingerprint
 pub fn parse_fingerprint(
     zip_path: &PathBuf,
 ) -> Result<(Vec<String>, HashMap<String, PathBuf>), String> {
@@ -282,6 +265,8 @@ pub fn parse_fingerprint(
     let mut path_map = HashMap::new();
 
     println!("[DEBUG] Scanning for fingerprint.txt…");
+
+    // Phase 1: extract fingerprint map
     for entry in archive.entries().map_err(|e| e.to_string())? {
         let mut entry = entry.map_err(|e| e.to_string())?;
         let header_path = entry.path().map_err(|e| e.to_string())?;
@@ -302,6 +287,8 @@ pub fn parse_fingerprint(
     }
 
     println!("[DEBUG] Re-opening archive to collect entries");
+
+    // Phase 2: list remaining archive contents
     let file = File::open(zip_path).map_err(|e| e.to_string())?;
     let mut archive = Archive::new(file);
     let mut entries = Vec::new();
@@ -326,7 +313,8 @@ pub fn parse_fingerprint(
     Ok((entries, path_map))
 }
 
-// Retrieves the embedded fingerprint from the environment variable or returns a default value.
+// Reads fingerprint value at compile time if embedde with '--env'
+// Used to mark backups made by this build variant
 pub fn get_fingered() -> &'static str {
     const DEFAULT: &str = "DEFAULT_FINGERPRINT";
 
@@ -342,8 +330,8 @@ pub fn get_fingered() -> &'static str {
     }
 }
 
-// This function checks if the original path starts with "C:\Users\" and adjusts it to the current
-// user's home directory.
+// Attempts to rewrite an archived Windows-style path to match the current user's home directory
+// e.g., C:\Users\olduser\... -> C:\Users\currentuser...
 pub fn adjust_path(original: &Path, current_home: &Path) -> PathBuf {
     let og_str = original.to_string_lossy();
     let current_str = current_home.to_string_lossy();
@@ -358,7 +346,6 @@ pub fn adjust_path(original: &Path, current_home: &Path) -> PathBuf {
             let expected_prefix = format!("C:\\Users\\{old_username}");
             println!("[DEBUG] Detected old user prefix: {expected_prefix}");
 
-            // Check if the original path starts with the expected prefix.
             if og_str.starts_with(&expected_prefix) {
                 let rel_path = og_str.strip_prefix(&expected_prefix).unwrap_or("");
                 let adjusted = format!("{current_str}{rel_path}");
@@ -372,13 +359,11 @@ pub fn adjust_path(original: &Path, current_home: &Path) -> PathBuf {
     original.to_path_buf()
 }
 
-// This function checks if the given path exists, and if not, it attempts to adjust it based on the
-// current user's home directory. If the adjusted path exists, it returns that; otherwise, it
-// returns None.
+// If path doesn't exist, try mapping it to current home dir using adjust_path()
+// Returns None if neither original nor adjusted path resolves
 pub fn fix_skip(p: &Path) -> Option<PathBuf> {
     println!("[DEBUG] fix_skip: Checking path {}", p.display());
 
-    // If the original path exists, return it as-is.
     if p.exists() {
         println!("[DEBUG] -> Path exists, using as-is");
         return Some(p.to_path_buf());
@@ -387,7 +372,6 @@ pub fn fix_skip(p: &Path) -> Option<PathBuf> {
     let current_home = dirs::home_dir()?; // Get the current user's home directory.
     let adjusted = adjust_path(p, &current_home); // Adjust the path based on the current home directory.
 
-    // If the adjusted path exists, return it; otherwise, return None.
     if adjusted.exists() {
         println!(
             "[DEBUG] -> Adjusted path exists: using {}",
@@ -395,8 +379,6 @@ pub fn fix_skip(p: &Path) -> Option<PathBuf> {
         );
         Some(adjusted)
     } else {
-        // If neither the original nor the adjusted path exists, log a debug message and return
-        // none.
         println!(
             "[DEBUG] -> Neither original nor adjusted path exists ({} -> {})",
             p.display(),

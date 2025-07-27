@@ -30,13 +30,12 @@ use serde::{Deserialize, Serialize};
 
 type RestoreMsg = Result<(FolderTreeNode, PathBuf), String>; // Result type for restore operations
 
-// Define the structure of the backup template
 #[derive(Serialize, Deserialize)]
 struct BackupTemplate {
     paths: Vec<PathBuf>,
 }
 
-// Implement a function to fix paths that are skipped
+// Node used to construct a tree from backup/restore paths
 #[derive(Default)]
 struct FolderTreeNode {
     children: HashMap<String, FolderTreeNode>,
@@ -44,22 +43,18 @@ struct FolderTreeNode {
     is_file: bool,
 }
 
+// Builds FolderTreeNode structure from a list of string paths
 #[allow(dead_code)]
-// Function to build a folder tree from a list of paths
 fn build_tree_from_paths(paths: &[String]) -> FolderTreeNode {
-    // Create a root node for the folder tree
     let mut root = FolderTreeNode::default();
     for path in paths {
-        // Split the path into components and build the tree
         let mut current = &mut root;
         for part in Path::new(path).components() {
-            // Convert the component to a string and insert it into the tree
             let key = part.as_os_str().to_string_lossy().to_string();
             current = current
                 .children
                 .entry(key.clone())
                 .or_insert(FolderTreeNode {
-                    // Initialize the new node with an empty children map, checked state, and is_file flag
                     children: HashMap::new(),
                     checked: true,
                     is_file: false,
@@ -71,19 +66,15 @@ fn build_tree_from_paths(paths: &[String]) -> FolderTreeNode {
 }
 
 fn main() -> Result<(), eframe::Error> {
-    // Initialize the logger
     println!("[DEBUG] main: Starting application");
 
-    dotenv::dotenv().ok();
-    // Load environment variables from .env file if present
+    dotenv::dotenv().ok(); // Load enviroment variables from .env if available
     println!("[DEBUG] .env loaded (if present)");
 
-    let icon = load_icon_image();
-    // Load the application icon
+    let icon = load_icon_image(); // Load application image
     println!("[DEBUG] Icon loaded");
 
     let options = eframe::NativeOptions {
-        // Set the initial window size
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([410.0, 450.0])
             .with_resizable(false)
@@ -103,14 +94,14 @@ fn main() -> Result<(), eframe::Error> {
     )
 }
 
-// Define the main tab enum to switch between Home and Settings
+// Enum to represent the active tab in the GUI
 #[derive(PartialEq)]
 enum MainTab {
     Home,
     Settings,
 }
 
-// Define the main application structure
+// Main GUI application state
 struct GUIApp {
     status: Arc<Mutex<String>>,
     selected_folders: Vec<PathBuf>,
@@ -132,7 +123,7 @@ struct GUIApp {
     conflict_resolution_mode: ConflictResolutionMode,
 }
 
-// Implement the Default trait for GUIApp to initialize the application state
+// Defaul  implementation for GUIApp to set initial values
 impl Default for GUIApp {
     fn default() -> Self {
         Self {
@@ -158,11 +149,11 @@ impl Default for GUIApp {
     }
 }
 
-// Implement the eframe::App trait for GUIApp to handle the application logic
+// Render the application UI
 impl eframe::App for GUIApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            // === Tabs ===
+            // === Tab navigation ===
             ui.horizontal(|ui| {
                 if ui
                     .selectable_label(self.tab == MainTab::Home, "Home")
@@ -178,46 +169,47 @@ impl eframe::App for GUIApp {
                 }
             });
 
+            // === Template Editor View ===
             if self.template_editor {
                 ui.label("Editing Template");
 
                 ui.add_space(4.0);
 
-                // === Template Path Editor ===
                 egui::ScrollArea::vertical()
                     .max_height(285.0)
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         let mut to_remove = None;
 
-                        // --- Path Rows ---
                         for (i, path) in self.template_paths.iter_mut().enumerate() {
                             let mut path_str = path.display().to_string();
 
                             ui.horizontal(|ui| {
+                                // Editable path text field
                                 ui.add_sized(
                                     [240.0, 20.0],
                                     egui::TextEdit::singleline(&mut path_str),
                                 );
 
-                                // Update the path if the text edit changes
                                 if path_str != path.display().to_string() {
                                     *path = PathBuf::from(path_str.clone());
                                 }
 
-                                // Check if the path exists and display a checkmark or cross
+                                // Excistance indicator
                                 if path.exists() {
                                     ui.label("✅").on_hover_text("This path exists");
                                 } else {
                                     ui.label("❌").on_hover_text("This path does not exist");
                                 }
 
+                                // Browse for folder
                                 if ui.button("Browse").clicked() {
                                     if let Some(p) = FileDialog::new().pick_folder() {
                                         *path = p;
                                     }
                                 }
 
+                                // Remove path
                                 if ui.button("Remove").clicked() {
                                     to_remove = Some(i);
                                 }
@@ -237,7 +229,6 @@ impl eframe::App for GUIApp {
                         let tpl = BackupTemplate {
                             paths: self.template_paths.clone(),
                         };
-                        // --- Save to JSON ---
                         match serde_json::to_string_pretty(&tpl) {
                             Ok(json) => {
                                 if fs::write(&path, json).is_ok() {
@@ -262,12 +253,12 @@ impl eframe::App for GUIApp {
                 return;
             }
 
+            // === Restrore Tree View ===
             if self.restore_editor {
                 ui.label("Restore Selection");
 
                 ui.add_space(4.0);
 
-                // === Restore Tree ===
                 egui::ScrollArea::vertical()
                     .max_height(300.0)
                     .show(ui, |ui| {
@@ -310,16 +301,16 @@ impl eframe::App for GUIApp {
                 return;
             }
 
+            // === Main Tab View ===
             match self.tab {
-                // Everything home related ui
                 MainTab::Home => {
+                    // Handle async result from restore preview thread
                     if let Some(finished_msg) =
                         self.restore_rx.as_ref().and_then(|rx| rx.try_recv().ok())
                     {
-                        // === Restore Result Handling ===
                         match finished_msg {
                             Ok((mut tree, zip)) => {
-                                // NEW: mark everything checked
+                                // Recursively check all nodes in the tree
                                 fn check_all(n: &mut FolderTreeNode) {
                                     n.checked = true;
                                     for c in n.children.values_mut() {
@@ -342,6 +333,7 @@ impl eframe::App for GUIApp {
                     ui.heading("Konserve");
                     ui.separator();
 
+                    // Folder and File Pickers
                     ui.horizontal(|ui| {
                         if ui.button("Add Folders").clicked() {
                             if let Some(folders) = FileDialog::new().pick_folders() {
@@ -360,11 +352,10 @@ impl eframe::App for GUIApp {
                         }
                     });
 
+                    // Show selected paths
                     if !self.selected_folders.is_empty() {
                         ui.add_space(4.0);
 
-                        // === Selected Items List ===
-                        // This will allow users to see all selected folders
                         let mut to_remove = None;
                         egui::ScrollArea::vertical()
                             .max_height(240.0)
@@ -382,7 +373,6 @@ impl eframe::App for GUIApp {
 
                         ui.add_space(4.0);
 
-                        // --- Clear Selection ---
                         if ui.button("Clear All").clicked() {
                             self.selected_folders.clear();
                         }
@@ -390,10 +380,10 @@ impl eframe::App for GUIApp {
 
                     ui.separator();
 
+                    // Template and Action Buttons
                     ui.horizontal(|ui| {
                         ui.vertical(|ui| {
                             let btn_size = egui::vec2(95.0, 17.0);
-                            // Load and Save Template buttons
                             ui.add_sized(btn_size, egui::Button::new("Load Template"))
                                 .clicked()
                                 .then(|| {
@@ -436,20 +426,16 @@ impl eframe::App for GUIApp {
                                     }
                                 });
 
-                            // Save Template button
                             ui.add_sized(btn_size, egui::Button::new("Save Template"))
                                 .clicked()
                                 .then(|| {
-                                    // Open file dialog to save the template
                                     if let Some(path) =
                                         FileDialog::new().add_filter("JSON", &["json"]).save_file()
                                     {
-                                        // --- Build Template Struct ---
                                         let template = BackupTemplate {
                                             paths: self.selected_folders.clone(),
                                         };
 
-                                        // --- Save to JSON ---
                                         if let Ok(json) = serde_json::to_string_pretty(&template) {
                                             if fs::write(&path, json).is_ok() {
                                                 *self.status.lock().unwrap() =
@@ -462,10 +448,9 @@ impl eframe::App for GUIApp {
                                     }
                                 });
                         });
-                        // === Backup / Restore Buttons ===
+                        // === Backup / Restore Controls ===
                         ui.vertical(|ui| {
                             let btn_size = egui::vec2(95.0, 17.0);
-                            // Create Backup button
                             ui.add_sized(btn_size, egui::Button::new("Create Backup"))
                                 .clicked()
                                 .then(|| {
@@ -505,16 +490,13 @@ impl eframe::App for GUIApp {
                                         }
                                     });
                                 });
-                            // Restore Backup button
                             ui.add_sized(btn_size, egui::Button::new("Restore Backup"))
                                 .clicked()
                                 .then(|| {
                                     let status = self.status.clone();
-                                    // Check if any folders are selected
                                     if let Some(zip_file) =
                                         FileDialog::new().add_filter("tar", &["tar"]).pick_file()
                                     {
-                                        // If a zip file is selected, start the restore process
                                         self.restore_opening = true;
                                         *status.lock().unwrap() = "Opening archive…".into();
 
@@ -524,7 +506,6 @@ impl eframe::App for GUIApp {
                                         self.restore_rx = Some(rx);
 
                                         thread::spawn(move || {
-                                            // Parse the fingerprint of the zip file
                                             let result: RestoreMsg = parse_fingerprint(&zip_file)
                                                 .map(|(entries, map)| {
                                                     (
@@ -541,7 +522,6 @@ impl eframe::App for GUIApp {
                     });
 
                     if self.restore_opening {
-                        // Show a spinner while the restore archive is being opened
                         ui.horizontal(|ui| {
                             ui.add(egui::Spinner::new().size(16.0)); // 16 px is default
                             ui.label("Opening archive…");
@@ -558,7 +538,6 @@ impl eframe::App for GUIApp {
                             let pct = p.get(); // 101 = done
                             match p.get() {
                                 0..=100 => {
-                                    // Show progress bar and percentage
                                     ui.add(
                                         egui::ProgressBar::new((p.get() as f32) / 100.0)
                                             .fill(egui::Color32::from_rgb(80, 160, 240))
@@ -585,7 +564,6 @@ impl eframe::App for GUIApp {
                     }
                 }
 
-                // Settings tab
                 MainTab::Settings => {
                     ui.heading("Settings");
                     ui.separator();
@@ -594,16 +572,13 @@ impl eframe::App for GUIApp {
                     ui.add_sized(btn_size, egui::Button::new("Edit Template"))
                         .clicked()
                         .then(|| {
-                            // Open the template editor
                             if let Some(path) =
                                 FileDialog::new().add_filter("JSON", &["json"]).pick_file()
                             {
-                                // --- Load Template File ---
                                 if let Ok(data) = fs::read_to_string(&path) {
                                     if let Ok(template) =
                                         serde_json::from_str::<BackupTemplate>(&data)
                                     {
-                                        // --- Parse & Open Editor ---
                                         self.template_paths = template
                                             .paths
                                             .into_iter()
@@ -720,10 +695,11 @@ impl eframe::App for GUIApp {
                     // === Wiring Placeholder ===
                     // When logic is implemented (in helpers.rs),
                     // use self.default_backup_location in your backup functions.
-
+                    //
                     // --- Save/Load Config ---
                     // serialization/deserialization
 
+                    // Apply changes to default backup location
                     let should_update = match &self.default_backup_location {
                         Some(p) => loc_str != p.display().to_string(),
                         None => !loc_str.is_empty(),
@@ -732,7 +708,7 @@ impl eframe::App for GUIApp {
                         if !loc_str.is_empty() {
                             self.default_backup_location = Some(std::path::PathBuf::from(&loc_str));
                             // TODO: Call a helper here to persist the setting, e.g.:
-                            // helpers::save_seggings(self);
+                            // helpers::save_settings(self);
                         } else {
                             self.default_backup_location = None;
                             // TODO: Call a helper here to clear the saved location if needed.

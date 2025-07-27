@@ -16,8 +16,8 @@ struct BackupTemplate {
     paths: Vec<PathBuf>,
 }
 
-// === Create Backup Archive ===
-
+// Construct a .tar archive containing the provided folders/files,
+// appends a fingerprint for mapping, and reports progress via atomic counter
 pub fn backup_gui(
     folders: &[PathBuf],
     output_dir: &Path,
@@ -38,8 +38,7 @@ pub fn backup_gui(
     // Start the fingerprint with identifier + info section
     let mut fingerprint_content = format!("{}\n[Backup Info]\n", get_fingered());
 
-    // === Assign UUIDs to folders ===
-    // (used to map files/folders to simple names in archive)
+    // Generate stable UUID mapping for top-level input
     let folder_uuid: Vec<(Uuid, &PathBuf)> = folders
         .iter()
         .map(|folder| {
@@ -49,7 +48,7 @@ pub fn backup_gui(
         })
         .collect();
 
-    // === Count Total Files ===
+    // Pre-count total files for progress tracking
     let total_files: u32 = folders
         .iter()
         .flat_map(|p| WalkDir::new(p).into_iter().filter_map(Result::ok))
@@ -59,11 +58,12 @@ pub fn backup_gui(
 
     let mut done = 0u32;
 
-    // === Create and Write fingerprint.txt ===
+    // Write UUID ↔ original path mappings to fingerprint section
     for (uuid, original_path) in &folder_uuid {
         fingerprint_content.push_str(&format!("{}: {}\n", uuid, original_path.display()));
     }
 
+    // Construct and append fingerprint.txt metadata file
     let mut fingerprint_header = Header::new_gnu();
     fingerprint_header.set_size(fingerprint_content.len() as u64);
     fingerprint_header.set_mode(0o644);
@@ -79,10 +79,10 @@ pub fn backup_gui(
         .map_err(|e| e.to_string())?;
     println!("[DEBUG] fingerprint.txt added to archive");
 
-    // === Walk through each folder/file and pack them ===
+    // === Main archive population ===
     for (uuid, original_path) in folder_uuid {
-        // Handle single file
         if original_path.is_file() {
+            // Top-level file (not inside folder): encode directly using UUID as name
             println!("[DEBUG] Adding single file: {}", original_path.display());
 
             let metadata = original_path.metadata().map_err(|e| e.to_string())?;
@@ -92,7 +92,6 @@ pub fn backup_gui(
 
             let mut f = File::open(original_path).map_err(|e| e.to_string())?;
 
-            // Add extension if it exists
             let entry_name = match original_path.extension().and_then(|e| e.to_str()) {
                 Some(ext) => format!("{uuid}.{ext}"),
                 None => uuid.to_string(),
@@ -109,7 +108,7 @@ pub fn backup_gui(
             continue;
         }
 
-        // Handle folder walk
+        // Handle directory entries (recursive walk)
         println!("[DEBUG] Walking folder: {}", original_path.display());
 
         for entry in WalkDir::new(original_path)
@@ -118,6 +117,8 @@ pub fn backup_gui(
         {
             let entry_path = entry.path();
             let metadata = entry.metadata().map_err(|e| e.to_string())?;
+
+            // Relative path from root -> mapped under UUID root
             let relative_path = entry_path.strip_prefix(original_path).unwrap();
             let tar_entry_path = Path::new(&uuid.to_string()).join(relative_path);
 
@@ -135,8 +136,8 @@ pub fn backup_gui(
                 done += 1;
                 progress.set(done * 100 / total_files);
             } else if metadata.is_dir() {
+                // Directory entries are included for structure but written as empty
                 println!("[DEBUG] Adding directory: {}", entry_path.display());
-                // Just create the directory, no content
                 tar_builder
                     .append_data(&mut header, tar_entry_path, io::empty())
                     .map_err(|e| e.to_string())?;
@@ -144,7 +145,7 @@ pub fn backup_gui(
         }
     }
 
-    // === Finalize Archive ===
+    // Finalize and flush .tar structure to disk
     tar_builder.finish().map_err(|e| e.to_string())?;
     println!("[DEBUG] Archive finished: {}", zip_path.display());
 
@@ -161,7 +162,7 @@ pub fn backup_gui(
 // let options: FileOptions<'_, ()> = FileOptions::default().compression_method(
 //     CompressionMethod::Deflated
 // );
-
+//
 // zip.start_file("fingerprint.txt", options).unwrap();
 // let mut fingerprint = format!("{}\n[Backup Info]\n", get_fingered());
 // for folder in folders {
@@ -173,9 +174,9 @@ pub fn backup_gui(
 //         ));
 //     }
 // }
-
+//
 // zip.write_all(fingerprint.as_bytes()).unwrap();
-
+//
 // for path in folders {
 //     if path.is_file() {
 //         let filename = path.file_name().unwrap().to_string_lossy();
@@ -191,10 +192,10 @@ pub fn backup_gui(
 //                     continue;
 //                 }
 //             };
-
+//
 //             let zip_folder = path.file_name().unwrap();
 //             let final_path = Path::new(zip_folder).join(relative);
-
+//
 //             if entry_path.is_file() {
 //                 zip.start_file(final_path.to_string_lossy(), options)
 //                     .unwrap();
@@ -207,7 +208,7 @@ pub fn backup_gui(
 //         }
 //     }
 //     }
-
+//
 //     zip.finish().unwrap();
 //     Ok(zip_path)
 // }
