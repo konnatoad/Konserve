@@ -15,6 +15,9 @@ use std::{
 };
 use tar::Archive;
 
+// Persistent configuration object for Konserve.
+// Stored in $XDG_CONFIG_HOME/konserve/config.json or fallback dirs.
+// Handles runtime flags and GUI state that should persist across sessions.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct KonserveConfig {
     #[serde(default)]
@@ -35,6 +38,7 @@ pub struct KonserveConfig {
     pub file_size_summary: bool,
 }
 
+// Provides default values for KonserveConfig when no config file exists.
 impl Default for KonserveConfig {
     fn default() -> Self {
         Self {
@@ -51,6 +55,7 @@ impl Default for KonserveConfig {
 }
 
 impl KonserveConfig {
+    // Resolve path to config file (XDG_CONFIG_HOME preferred)
     fn config_path() -> PathBuf {
         let base = dirs::config_dir()
             .or_else(dirs::data_dir) // fallback
@@ -60,6 +65,7 @@ impl KonserveConfig {
         base.join("konserve").join("config.json")
     }
 
+    // Load config from disk. Returns defaults if missing or malformed.
     pub fn load() -> Self {
         let path = Self::config_path();
         if let Ok(data) = fs::read_to_string(&path) {
@@ -71,6 +77,7 @@ impl KonserveConfig {
         Self::default()
     }
 
+    // Serialize and write current config to disk. Creates dirs as needed.
     pub fn save(&self) {
         let path = Self::config_path();
         if let Some(dir) = path.parent() {
@@ -82,6 +89,7 @@ impl KonserveConfig {
                 if let Err(e) = fs::write(&path, json) {
                     eprintln!("[ERROR] Failed to save config: {e}");
                 }
+                println!("[DEBUG] Saved config to {}", path.display());
             }
             Err(e) => {
                 eprintln!("[ERROR] Failed to serialize config: {e}");

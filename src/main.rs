@@ -750,7 +750,12 @@ impl eframe::App for GUIApp {
 
                         self.config.save();
                         *self.status.lock().unwrap() = "Settings saved".into();
+                        ctx.request_repaint();
                     }
+
+                    ui.separator();
+
+                    ui.label(format!("Status: {}", self.status.lock().unwrap()));
                 }
             }
         });
