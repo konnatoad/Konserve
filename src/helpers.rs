@@ -2,9 +2,10 @@ use crate::FolderTreeNode;
 use eframe::egui;
 use eframe::egui::IconData;
 use egui::CollapsingHeader;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
-    fs::File,
+    fs::{self, File},
     io::Read,
     path::{Path, PathBuf},
     sync::{
@@ -14,9 +15,84 @@ use std::{
 };
 use tar::Archive;
 
+#[derive(Serialize, Deserialize, Clone)]
+pub struct KonserveConfig {
+    #[serde(default)]
+    pub verbose_logging: bool,
+    #[serde(default)]
+    pub compression_enabled: bool,
+    #[serde(default)]
+    pub compression_level: super::CompressionLevel,
+    #[serde(default)]
+    pub conflict_resolution_enabled: bool,
+    #[serde(default)]
+    pub conflict_resolution_mode: super::ConflictResolutionMode,
+    #[serde(default)]
+    pub default_backup_location: Option<PathBuf>,
+    #[serde(default)]
+    pub automatic_updates: bool,
+    #[serde(default)]
+    pub file_size_summary: bool,
+}
+
+impl Default for KonserveConfig {
+    fn default() -> Self {
+        Self {
+            verbose_logging: false,
+            compression_enabled: false,
+            compression_level: super::CompressionLevel::Normal,
+            conflict_resolution_enabled: false,
+            conflict_resolution_mode: super::ConflictResolutionMode::default(),
+            default_backup_location: None,
+            automatic_updates: false,
+            file_size_summary: false,
+        }
+    }
+}
+
+impl KonserveConfig {
+    fn config_path() -> PathBuf {
+        let base = dirs::config_dir()
+            .or_else(dirs::data_dir) // fallback
+            .or_else(dirs::home_dir)
+            .unwrap_or(PathBuf::from("."));
+
+        base.join("konserve").join("config.json")
+    }
+
+    pub fn load() -> Self {
+        let path = Self::config_path();
+        if let Ok(data) = fs::read_to_string(&path) {
+            if let Ok(cfg) = serde_json::from_str(&data) {
+                println!("[DEBUG] Loading config from {}", path.display());
+                return cfg;
+            }
+        }
+        Self::default()
+    }
+
+    pub fn save(&self) {
+        let path = Self::config_path();
+        if let Some(dir) = path.parent() {
+            let _ = fs::create_dir_all(dir);
+        }
+
+        match serde_json::to_string_pretty(self) {
+            Ok(json) => {
+                if let Err(e) = fs::write(&path, json) {
+                    eprintln!("[ERROR] Failed to save config: {e}");
+                }
+            }
+            Err(e) => {
+                eprintln!("[ERROR] Failed to serialize config: {e}");
+            }
+        }
+    }
+}
+
 // Describes how to resolve name collisions during restore.
 // Used when two files would overwirte each other.
-#[derive(PartialEq, Eq, Clone, Copy, Default)]
+#[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Copy, Default)]
 pub enum ConflictResolutionMode {
     #[default]
     Prompt, // Ask user
@@ -26,7 +102,7 @@ pub enum ConflictResolutionMode {
 }
 
 // Selectable  compression tiers for backup
-#[derive(Default, PartialEq, Eq, Clone, Copy)]
+#[derive(Serialize, Deserialize, Default, PartialEq, Eq, Clone, Copy)]
 pub enum CompressionLevel {
     Fast,
     #[default]
