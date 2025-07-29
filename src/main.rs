@@ -121,11 +121,16 @@ struct GUIApp {
     default_backup_location: Option<PathBuf>,
     conflict_resolution_enabled: bool,
     conflict_resolution_mode: ConflictResolutionMode,
+    verbose_logging: bool,
+    automatic_updates: bool,
+    file_size_summary: bool,
+    config: helpers::KonserveConfig,
 }
 
 // Defaul  implementation for GUIApp to set initial values
 impl Default for GUIApp {
     fn default() -> Self {
+        let config = helpers::KonserveConfig::load();
         Self {
             status: Arc::new(Mutex::new("Waiting...".to_string())),
             selected_folders: Vec::new(),
@@ -140,11 +145,15 @@ impl Default for GUIApp {
             restore_opening: false,
             restore_rx: None,
             tab: MainTab::Home,
-            compression_enabled: false,
-            compression_level: CompressionLevel::Normal,
-            default_backup_location: None,
-            conflict_resolution_enabled: false,
-            conflict_resolution_mode: ConflictResolutionMode::default(),
+            compression_enabled: config.compression_enabled,
+            compression_level: config.compression_level,
+            default_backup_location: config.default_backup_location.clone(),
+            conflict_resolution_enabled: config.conflict_resolution_enabled,
+            conflict_resolution_mode: config.conflict_resolution_mode,
+            verbose_logging: config.verbose_logging,
+            automatic_updates: config.automatic_updates,
+            file_size_summary: false,
+            config,
         }
     }
 }
@@ -666,6 +675,18 @@ impl eframe::App for GUIApp {
                             });
                     }
 
+                    ui.checkbox(&mut self.verbose_logging, "Enable Verbose Logging (WIP)");
+
+                    ui.checkbox(
+                        &mut self.automatic_updates,
+                        "Enable Updates on Startup (WIP)",
+                    );
+
+                    ui.checkbox(
+                        &mut self.file_size_summary,
+                        "Enable File Size Summary (WIP)",
+                    );
+
                     ui.separator();
 
                     ui.label("Default backup location:");
@@ -713,6 +734,22 @@ impl eframe::App for GUIApp {
                             self.default_backup_location = None;
                             // TODO: Call a helper here to clear the saved location if needed.
                         }
+                    }
+
+                    ui.separator();
+
+                    if ui.button("Save").clicked() {
+                        self.config.verbose_logging = self.verbose_logging;
+                        self.config.compression_enabled = self.compression_enabled;
+                        self.config.compression_level = self.compression_level;
+                        self.config.conflict_resolution_enabled = self.conflict_resolution_enabled;
+                        self.config.conflict_resolution_mode = self.conflict_resolution_mode;
+                        self.config.default_backup_location = self.default_backup_location.clone();
+                        self.config.automatic_updates = self.automatic_updates;
+                        self.config.file_size_summary = self.file_size_summary;
+
+                        self.config.save();
+                        *self.status.lock().unwrap() = "Settings saved".into();
                     }
                 }
             }
