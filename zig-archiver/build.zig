@@ -14,7 +14,7 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(lib);
 
-    // Optional: add test support if you want
+    // Add test support if you want
     const tests = b.addTest(.{
         .root_source_file = .{ .path = "src/main.zig" },
         .target = target,
