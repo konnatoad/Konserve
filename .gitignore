@@ -1,11 +1,29 @@
+# Rust build crap
 /target/
-Cargo.lock
-.env
-.vscode/
-launch.json
-**/*.rs.bk
 *.rmeta
 /.cargo/
+
+# Lock and config files
+Cargo.lock
+launch.json
 .env
 Konserve.wiki
+
+# Backup files
+**/*.rs.bk
+
+# Zig build junk
+zig-archiver/zig-out/
+zig-archiver/.zig-cache/
+.zig-cache/
+.zig-out/
+
+# OS/Editor shit
+.DS_Store     # Apple's "ephemeral" trash - comes back every fucking time if i open a macbook
+._.DS_Store   # Incompetent slugs - one pile of shit wasn't enough ? jfc...
+*.swp
+*.swo
+*.tmp
+*~
+.vscode/
 
