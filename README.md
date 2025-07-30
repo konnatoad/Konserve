@@ -6,7 +6,9 @@ A simple GUI backup utility for Windows, designed to help you **back up** import
 > ✔ Embedded build-time fingerprint  
 > ✔ Template support  
 > ✔ Partial restore with visual tree selection & progress  
-> ✔ Smart path correction across Windows users  
+> ✔ Smart path correction across Windows users
+
+**Roadmap:** [See what's planned for v0.2.0 →](https://github.com/konnatoad/Konserve/wiki/Roadmap)
 
 ---
 
