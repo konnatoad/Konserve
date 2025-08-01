@@ -21,22 +21,27 @@
 // TODO: Wire compression settings from konserve's Rust config into the Zig compressor.
 
 const std = @import("std");
+const builtin = @import("builtin");
+const cli_build = @import("root").cli_build; // build.zig sets this
 
-/// Called from Rust. Right now just a test stub-
-/// Later this will do the actual .tar.gz compression.
 pub export fn konserve_compress(
     level: u8,
     output: [*:0]const u8,
+    files: [*]const [*:0]const u8,
+    file_count: usize,
 ) c_int {
-    std.debug.print("Zig compression stub -> level {}, output; {s}\n", .{ level, output });
-    return 0; // success
+    std.debug.print("Zig compression stub -> level {}, output: {s}\n", .{ level, output });
+    return 0;
 }
 
 pub fn main() !void {
+    if (!cli_build) return; // don’t compile CLI main for library builds
+
     const gpa = std.heap.page_allocator;
     const args = try std.process.argsAlloc(gpa);
     defer std.process.argsFree(gpa, args);
 
+    // CLI arg parsing stays as you wrote
     if (args.len > 1 and std.mem.eql(u8, args[1], "--help")) {
         std.debug.print(
             "Usage: konserve-archiver [--level N] [--output FILE] [files...]\n\n" ++
@@ -48,13 +53,11 @@ pub fn main() !void {
         return;
     }
 
-    // defaults
     var level: []const u8 = "6";
     var output: []const u8 = "backup.tar.gz";
     var files = std.ArrayList([]const u8).init(gpa);
     defer files.deinit();
 
-    // parse args
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "--level")) {
@@ -74,7 +77,6 @@ pub fn main() !void {
 
     std.debug.print("level: {s}\n", .{level});
     std.debug.print("output: {s}\n", .{output});
-
     if (files.items.len == 0) {
         std.debug.print("no files passed\n", .{});
     } else {
@@ -82,6 +84,5 @@ pub fn main() !void {
         for (files.items) |f| {
             std.debug.print("  {s}\n", .{f});
         }
-        std.debug.print("\n", .{});
     }
 }

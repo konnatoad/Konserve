@@ -1,11 +1,20 @@
+//! # Konserve
+//!
+//! Konserve is a simple desktop backup and restore tool
+//!
+//! - Create `.tar` archives, with optional `.tar.gz` compression (WIP)
+//! - Select files and folders manually via reusable templates.
+//! - Restore backups to their original destination with a tree view with selections
+//!
+//! Most settings related features are still work in progress.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod backup;
 mod helpers;
 mod restore;
+mod zigffi;
 
 use backup::backup_gui;
-use helpers::CompressionLevel;
 use helpers::ConflictResolutionMode;
 use helpers::Progress;
 use helpers::build_human_tree;
@@ -28,14 +37,35 @@ use eframe::egui;
 use rfd::FileDialog;
 use serde::{Deserialize, Serialize};
 
+/// Type alias for messages exchanged during restore operations.
+///
+/// Used internally to communicate results of parsing a backup archive.
+///
+/// - On success: Contains a tuple of the root [`FolderTreeNode`] and the  original [`FolderTreeNode`] pointing to the `.tar` file.
+/// - On failure: Contains an error string describing why parsing failed
 type RestoreMsg = Result<(FolderTreeNode, PathBuf), String>; // Result type for restore operations
 
+/// A template representing a reusable set of file and folder paths.
+///
+/// Templates are serialized as JSON and can be saved/loaded by the user
+/// to quickly restore backup selections.
+///
+/// # Fields
+/// - `paths`: The list of filesystem paths that user selected to be part of a backup.
 #[derive(Serialize, Deserialize)]
 struct BackupTemplate {
     paths: Vec<PathBuf>,
 }
 
-// Node used to construct a tree from backup/restore paths
+/// A node in the restore/backup folder tree.
+///
+/// Each node may represent a file or folder.
+/// Used to build a checkbox tree UI for selecting what to back up or restore.
+///
+/// # Fields
+/// - `children`: A mapping of child names (file or folder) to their nodes.
+/// - `checked`: Whether this node is currently selected in the UI.
+/// - `is_file`: True if this node represents a file, false if a directory.
 #[derive(Default)]
 struct FolderTreeNode {
     children: HashMap<String, FolderTreeNode>,
@@ -43,7 +73,28 @@ struct FolderTreeNode {
     is_file: bool,
 }
 
-// Builds FolderTreeNode structure from a list of string paths
+/// Builds a hierarchical tree structure from a list of file system paths.
+///
+/// This function constructs a [`FolderTreeNode`] tree where each node
+/// represents a directory or file. It is used to display the contents
+/// of a backup archive in a checkbox tree, so users can select which
+/// files to restore.
+///
+/// # Arguments
+/// - `paths` – A slice of paths (as strings) that should be added to the tree.
+///
+/// # Returns
+/// - A [`FolderTreeNode`] representing the root of the constructed tree.
+///
+/// # Example
+/// ```
+/// let paths = vec![
+///     "Documents/report.docx".to_string(),
+///     "Pictures/vacation/photo1.jpg".to_string(),
+/// ];
+/// let tree = build_tree_from_paths(&paths);
+/// assert!(tree.children.contains_key("Documents"));
+/// ```
 #[allow(dead_code)]
 fn build_tree_from_paths(paths: &[String]) -> FolderTreeNode {
     let mut root = FolderTreeNode::default();
@@ -65,6 +116,12 @@ fn build_tree_from_paths(paths: &[String]) -> FolderTreeNode {
     root
 }
 
+/// Entry point
+///
+/// Initializes enviroment variables, loads the application icon,
+/// configures [`eframe::NativeOptions`], and launches the GUI.
+///
+/// Returns an [`eframe::Error`] if the GUI fails to start.
 fn main() -> Result<(), eframe::Error> {
     println!("[DEBUG] main: Starting application");
 
@@ -94,14 +151,22 @@ fn main() -> Result<(), eframe::Error> {
     )
 }
 
-// Enum to represent the active tab in the GUI
+/// Tabs available in the Konserve user interface.
+///
+/// Used for switching between different screens of the app.
 #[derive(PartialEq)]
 enum MainTab {
+    /// Main screen for selecting files/folders and performing backup/restore.
     Home,
+    /// Settings screen for configuring preferences such as compression
+    /// or conflict resolution.
     Settings,
 }
 
-// Main GUI application state
+/// Main application state
+///
+/// Holds user settings, selected backup paths, progress indicators,
+/// and the active tab. Implements [`eframe::App`] to render the GUI.
 struct GUIApp {
     status: Arc<Mutex<String>>,
     selected_folders: Vec<PathBuf>,
@@ -117,7 +182,6 @@ struct GUIApp {
     restore_rx: Option<mpsc::Receiver<RestoreMsg>>,
     tab: MainTab,
     compression_enabled: bool,
-    compression_level: CompressionLevel,
     default_backup_location: Option<PathBuf>,
     conflict_resolution_enabled: bool,
     conflict_resolution_mode: ConflictResolutionMode,
@@ -127,7 +191,11 @@ struct GUIApp {
     config: helpers::KonserveConfig,
 }
 
-// Defaul  implementation for GUIApp to set initial values
+/// Default initialization for [`GUIApp`].
+///
+/// Loads user configuration from [`helpers::KonserveConfig`],
+/// applies it to the struct fields, and sets sensible defaults
+/// for everything else (like "Waiting..." as the initial status).
 impl Default for GUIApp {
     fn default() -> Self {
         let config = helpers::KonserveConfig::load();
@@ -146,7 +214,6 @@ impl Default for GUIApp {
             restore_rx: None,
             tab: MainTab::Home,
             compression_enabled: config.compression_enabled,
-            compression_level: config.compression_level,
             default_backup_location: config.default_backup_location.clone(),
             conflict_resolution_enabled: config.conflict_resolution_enabled,
             conflict_resolution_mode: config.conflict_resolution_mode,
@@ -158,11 +225,23 @@ impl Default for GUIApp {
     }
 }
 
-// Render the application UI
+/// Implements the main event loop and UI rendering
+///
+/// - **Home tab**: Add folders/files, load or save templates, create backups, and restore from existing archives.
+/// - **Settings tab**: Configure various settings and preferences.
+/// - Handles template editing and restore selection views as modal sub-screens.
 impl eframe::App for GUIApp {
+    /// Main application update loop.
+    ///
+    /// Called every frame by `eframe`.
+    ///
+    /// Manages background backup/restore threads.
+    ///
+    /// # Parameters
+    /// - `ctx`: egui context used to render the UI.
+    /// - `_frame`: Frame handle (unused here).
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            // === Tab navigation ===
             ui.horizontal(|ui| {
                 if ui
                     .selectable_label(self.tab == MainTab::Home, "Home")
@@ -178,7 +257,6 @@ impl eframe::App for GUIApp {
                 }
             });
 
-            // === Template Editor View ===
             if self.template_editor {
                 ui.label("Editing Template");
 
@@ -262,7 +340,6 @@ impl eframe::App for GUIApp {
                 return;
             }
 
-            // === Restrore Tree View ===
             if self.restore_editor {
                 ui.label("Restore Selection");
 
@@ -310,7 +387,6 @@ impl eframe::App for GUIApp {
                 return;
             }
 
-            // === Main Tab View ===
             match self.tab {
                 MainTab::Home => {
                     // Handle async result from restore preview thread
@@ -457,7 +533,6 @@ impl eframe::App for GUIApp {
                                     }
                                 });
                         });
-                        // === Backup / Restore Controls ===
                         ui.vertical(|ui| {
                             let btn_size = egui::vec2(95.0, 17.0);
                             ui.add_sized(btn_size, egui::Button::new("Create Backup"))
@@ -472,39 +547,67 @@ impl eframe::App for GUIApp {
                                         return;
                                     }
 
-                                    *status.lock().unwrap() = "Packing into .tar".into();
+                                    if self.compression_enabled {
+                                        *status.lock().unwrap() =
+                                            "Packing into .tar and compressing (gzip)...".into();
+                                    } else {
+                                        *status.lock().unwrap() = "Packing into .tar".into();
+                                    }
 
                                     let progress = Progress::default();
                                     self.backup_progress = Some(progress.clone());
 
-                                    thread::spawn(move || {
-                                        if let Some(out_dir) = FileDialog::new()
-                                            .set_title("Choose backup destination")
-                                            .pick_folder()
-                                        {
-                                            match backup_gui(&folders, &out_dir, &progress) {
-                                                Ok(path) => {
-                                                    *status.lock().unwrap() = format!(
-                                                        "✅ Backup created:\n{}",
-                                                        path.display()
-                                                    );
-                                                }
-                                                Err(e) => {
-                                                    *status.lock().unwrap() =
-                                                        format!("❌ Backup failed: {e}");
-                                                }
-                                            }
-                                        } else {
-                                            *status.lock().unwrap() = "❌ Cancelled.".into();
-                                        }
-                                    });
-                                });
+                                    let compression_enabled = self.compression_enabled;
+
+                                    let out_dir = FileDialog::new()
+                                        .set_title("Choose backup destination")
+                                        .pick_folder();
+
+                                    // Use a Builder to give the compression thread a bigger stack
+                                        std::thread::Builder::new()
+                                        .name("konserve-backup".into())
+                                        .stack_size(8 * 1024 * 1024) // 8 MiB
+                                    .spawn(move || {
+                                            if let Some(out_dir) = out_dir {
+                                                match backup_gui(&folders, &out_dir, &progress) {
+                                                    Ok(path) => {
+                                                        if compression_enabled {
+                                use std::ffi::CString;
+                                let targz_path = path.with_extension("tar.gz");
+                                let c_in  = CString::new(path.to_string_lossy().as_bytes()).unwrap();
+                                let c_out = CString::new(targz_path.to_string_lossy().as_bytes()).unwrap();
+
+                                unsafe {
+                                    let rc = zigffi::konserve_gzip_tar(c_in.as_ptr(), c_out.as_ptr());
+                                    if rc == 0 {
+                                        let _ = std::fs::remove_file(&path);
+                                        *status.lock().unwrap() = format!("✅ Backup created:\n{}", targz_path.display());
+                                    } else {
+                                        *status.lock().unwrap() = format!("❌ Gzip step failed (code {rc})");
+                                    }
+                                }
+                            } else {
+                                *status.lock().unwrap() = format!("✅ Backup created:\n{}", path.display());
+                            }
+                        }
+                        Err(e) => {
+                            *status.lock().unwrap() =
+                                format!("❌ Backup failed: {e}");
+                        }
+                    }
+                } else {
+                    *status.lock().unwrap() = "❌ Cancelled.".into();
+                }
+            })
+            .expect("failed to spawn backup thread");
+    });
                             ui.add_sized(btn_size, egui::Button::new("Restore Backup"))
                                 .clicked()
                                 .then(|| {
                                     let status = self.status.clone();
-                                    if let Some(zip_file) =
-                                        FileDialog::new().add_filter("tar", &["tar"]).pick_file()
+                                    if let Some(zip_file) = FileDialog::new()
+                                        .add_filter("Tar archives", &["tar", "tar.gz"])
+                                        .pick_file()
                                     {
                                         self.restore_opening = true;
                                         *status.lock().unwrap() = "Opening archive…".into();
@@ -605,32 +708,6 @@ impl eframe::App for GUIApp {
                     ui.separator();
 
                     ui.checkbox(&mut self.compression_enabled, "Enable Compression (WIP)");
-
-                    if self.compression_enabled {
-                        egui::ComboBox::from_label("Compression Level (WIP)")
-                            .selected_text(match self.compression_level {
-                                CompressionLevel::Fast => "Fast",
-                                CompressionLevel::Normal => "Normal",
-                                CompressionLevel::Maximum => "Maximum",
-                            })
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(
-                                    &mut self.compression_level,
-                                    CompressionLevel::Fast,
-                                    "Fast",
-                                );
-                                ui.selectable_value(
-                                    &mut self.compression_level,
-                                    CompressionLevel::Normal,
-                                    "Normal",
-                                );
-                                ui.selectable_value(
-                                    &mut self.compression_level,
-                                    CompressionLevel::Maximum,
-                                    "Maximum",
-                                );
-                            });
-                    }
 
                     let mut loc_str = self
                         .default_backup_location
@@ -741,7 +818,6 @@ impl eframe::App for GUIApp {
                     if ui.button("Save").clicked() {
                         self.config.verbose_logging = self.verbose_logging;
                         self.config.compression_enabled = self.compression_enabled;
-                        self.config.compression_level = self.compression_level;
                         self.config.conflict_resolution_enabled = self.conflict_resolution_enabled;
                         self.config.conflict_resolution_mode = self.conflict_resolution_mode;
                         self.config.default_backup_location = self.default_backup_location.clone();

@@ -1,3 +1,17 @@
+//! # Backup Module
+//!
+//! Handles creation of `.tar` backup archives
+//!
+//! - Accepts a list of user-selected files and folders.
+//! - Packages them into a `.tar` archive (with optional compression planned).
+//! - Embeds a `fingerprint.txt` file that maps UUIDs to original paths,
+//!   ensuring that restores can accurately reconstruct file locations.
+//! - Tracks progress using the [`Progress`] helper
+//!   so the GUI can display live status updates.
+//!
+//! ## Notes
+//! - Current format is `.tar`. `.tar.gz` support is planned but not yet active.
+//! - Old `.zip` format is deprecated and left as commented legacy code.
 use crate::helpers::{Progress, get_fingered};
 use std::{
     fs::File,
@@ -11,13 +25,54 @@ use tar::{Builder, Header};
 use uuid::Uuid;
 use walkdir::WalkDir;
 
+/// A reusable backup template for saving and loading user selected paths
+///
+/// Templates allow users to predefine which files or folders
+/// should be backed up, so they don't have to select them manually every time.
+///
+/// Saved as JSON using [`serde`].
 #[derive(Serialize, Deserialize)]
 struct BackupTemplate {
+    /// List of filesystem paths included in the template.
     paths: Vec<PathBuf>,
 }
 
-// Construct a .tar archive containing the provided folders/files,
-// appends a fingerprint for mapping, and reports progress via atomic counter
+/// Create a `.tar` backup archive of the given folders or files.
+///
+/// This function is used by the GUI to build a `.tar` archive
+/// from user-selected folders and files.  
+/// It embeds a `fingerprint.txt` metadata file inside the archive,
+/// which contains:
+/// - a unique identifier for the backup session
+/// - a mapping of randomly generated UUIDs to original paths
+///
+/// The backup progress is reported via a shared [`Progress`] counter,
+/// which allows the GUI to update a progress bar.
+///
+/// # Arguments
+/// - `folders`: A list of file or folder paths to include in the backup.
+/// - `output_dir`: The directory where the `.tar` archive should be created.
+/// - `progress`: A [`Progress`] instance used to report completion percentage.
+///
+/// # Returns
+/// - `Ok(PathBuf)` containing the path to the created `.tar` file on success.
+/// - `Err(String)` with an error message if the backup failed.
+///
+/// # Example
+/// ```rust,no_run
+/// use std::path::PathBuf;
+/// use konserve::helpers::Progress;
+/// use konserve::backup::backup_gui;
+///
+/// let folders = vec![PathBuf::from("Documents"), PathBuf::from("Pictures")];
+/// let output = PathBuf::from("Backups");
+/// let progress = Progress::default();
+///
+/// let result = backup_gui(&folders, &output, &progress);
+/// if let Ok(archive) = result {
+///     println!("Backup created at {}", archive.display());
+/// }
+/// ```
 pub fn backup_gui(
     folders: &[PathBuf],
     output_dir: &Path,

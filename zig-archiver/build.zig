@@ -4,24 +4,26 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // Create a static library for Rust to link against
+    // ---- static library used by Rust ----
     const lib = b.addStaticLibrary(.{
         .name = "konserve_archiver",
-        .root_source_file = .{ .path = "src/main.zig" },
+        .root_source_file = b.path("src/lib.zig"),
         .target = target,
         .optimize = optimize,
     });
+    // Make it linkable into Rust’s PIE:
+    lib.root_module.pic = true;
+    // Optional: avoid needing __zig_probe_stack when linked into Rust:
+    lib.root_module.stack_check = false;
 
     b.installArtifact(lib);
 
-    // Add test support
-    const tests = b.addTest(.{
-        .root_source_file = .{ .path = "src/main.zig" },
+    // (optional) small CLI for debugging
+    const exe = b.addExecutable(.{
+        .name = "konserve-archiver",
+        .root_source_file = b.path("src/cli.zig"),
         .target = target,
         .optimize = optimize,
     });
-    const run_tests = b.addRunArtifact(tests);
-
-    const test_step = b.step("test", "Run unit tests");
-    test_step.dependOn(&run_tests.step);
+    b.installArtifact(exe);
 }

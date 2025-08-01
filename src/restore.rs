@@ -1,3 +1,10 @@
+//! Restore module
+//!
+//! Handles extraction of `.tar` backups
+//!
+//! Validates the archive using fingerprint.txt
+//! Reconstructs file paths from UUID mappings
+//! Supports restoring either the entire backup or a subset chosen in the UI
 use crate::helpers::{Progress, adjust_path, get_fingered};
 use std::{
     collections::{HashMap, HashSet},
@@ -8,14 +15,47 @@ use std::{
 };
 use tar::Archive;
 
+/// Normalize a string path to a canonical form.
+///
+/// Converts Windows-style backslashes (`\`) into forward slashes (`/`)
+/// to make path comparison consistent across platforms.
+///
+/// # Arguments
+/// - `s`: Path-like string slice.
+///
+/// # Returns
+/// - A `String` with normalized separators.
+///
+/// # Example
+/// ```
+/// let p = canon("C:\\Users\\Jootu\\Documents");
+/// assert_eq!(p, "C:/Users/Jootu/Documents");
+/// ```
 fn canon<S: AsRef<str>>(s: S) -> String {
     s.as_ref().replace('\\', "/")
 }
 
-// Extracts files from a .tar archive previously created by the backup system
-// Validates the archive using the embedded fingerprint, reconstructs paths using the UUID to
-// orifinal map,
-// and optionally limits restoration to a human-selected subset.
+/// Restore files from a `.tar` backup archive.
+///
+/// Reads a `.tar` file created by [`backup_gui`](crate::backup::backup_gui),
+/// validates its fingerprint, and restores files to their original locations.
+/// Optionally, only a subset of files chosen by the user is restored.
+///
+/// # Arguments
+/// - `zip_path`: Path to the `.tar` archive.
+/// - `selected`: Optional list of human-readable file paths chosen by the user.
+///   If `None`, all files in the archive are restored.
+/// - `status`: Shared string for UI status updates.
+/// - `progress`: [`Progress`] counter to update GUI progress bars.
+///
+/// # Returns
+/// - `Ok(())` if the restore completed successfully.
+/// - `Err(String)` with an error message if restore failed.
+///
+/// # Notes
+/// - The function looks for a `fingerprint.txt` file inside the archive
+///   to validate the backup and reconstruct UUID mappings.
+/// - Paths are adapted to the current user’s home directory where needed.
 pub fn restore_backup(
     zip_path: &PathBuf,
     selected: Option<Vec<String>>,
@@ -58,7 +98,6 @@ pub fn restore_backup(
 
     println!("[fingerprint] loaded, {} uuids", path_map.len());
 
-    // Resolve what to extract (if subset selected)
     let mut to_extract: HashSet<String> = HashSet::new();
 
     if let Some(human_sel_raw) = &selected {
@@ -88,7 +127,6 @@ pub fn restore_backup(
         }
     }
 
-    // Count matching files for progress tracking
     let total_files: u32 = {
         let mut arc = Archive::new(File::open(zip_path).map_err(|e| e.to_string())?);
         arc.entries()
