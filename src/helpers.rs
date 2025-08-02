@@ -71,7 +71,6 @@ pub struct KonserveConfig {
 /// # Defaults
 /// - `verbose_logging`: `false` — disables detailed debug logs
 /// - `compression_enabled`: `false` — compression disabled by default
-/// - `compression_level`: [`CompressionLevel::Normal`] — balanced default
 /// - `conflict_resolution_enabled`: `false` — conflict resolution off
 /// - `conflict_resolution_mode`: [`ConflictResolutionMode::Prompt`] (default)
 /// - `default_backup_location`: `None` — user must select manually
