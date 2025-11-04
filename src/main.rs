@@ -766,7 +766,7 @@ impl eframe::App for GUIApp {
 
                     ui.separator();
 
-                    ui.label("Default backup location:");
+                    ui.label("Default backup location: (WIP)");
                     ui.horizontal(|ui| {
                         ui.add_sized([240.0, 20.0], egui::TextEdit::singleline(&mut loc_str));
 
