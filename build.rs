@@ -1,5 +1,6 @@
 use std::{env, fs, path::PathBuf, process::Command};
 
+//
 fn embed_fingerprint() {
     const KEY: &str = "FINGERPRINT";
 
