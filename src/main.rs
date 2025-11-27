@@ -45,6 +45,9 @@ use serde::{Deserialize, Serialize};
 /// - On failure: Contains an error string describing why parsing failed
 type RestoreMsg = Result<(FolderTreeNode, PathBuf), String>; // Result type for restore operations
 
+/// Result of a background file dialog.
+type FileDialogMsg = Vec<PathBuf>;
+
 /// A template representing a reusable set of file and folder paths.
 ///
 /// Templates are serialized as JSON and can be saved/loaded by the user
@@ -118,14 +121,14 @@ fn build_tree_from_paths(paths: &[String]) -> FolderTreeNode {
 
 /// Entry point
 ///
-/// Initializes enviroment variables, loads the application icon,
+/// Initializes environment variables, loads the application icon,
 /// configures [`eframe::NativeOptions`], and launches the GUI.
 ///
 /// Returns an [`eframe::Error`] if the GUI fails to start.
 fn main() -> Result<(), eframe::Error> {
     println!("[DEBUG] main: Starting application");
 
-    dotenv::dotenv().ok(); // Load enviroment variables from .env if available
+    dotenv::dotenv().ok(); // Load environment variables from .env if available
     println!("[DEBUG] .env loaded (if present)");
 
     let icon = load_icon_image(); // Load application image
@@ -180,6 +183,9 @@ struct GUIApp {
     restore_progress: Option<Progress>,
     restore_opening: bool,
     restore_rx: Option<mpsc::Receiver<RestoreMsg>>,
+    // async file dialog handling for linux being fuck and freezing.
+    file_dialog_rx: Option<mpsc::Receiver<FileDialogMsg>>,
+    file_dialog_opening: bool,
     tab: MainTab,
     compression_enabled: bool,
     default_backup_location: Option<PathBuf>,
@@ -212,6 +218,8 @@ impl Default for GUIApp {
             restore_progress: None,
             restore_opening: false,
             restore_rx: None,
+            file_dialog_rx: None,
+            file_dialog_opening: false,
             tab: MainTab::Home,
             compression_enabled: config.compression_enabled,
             default_backup_location: config.default_backup_location.clone(),
@@ -415,27 +423,96 @@ impl eframe::App for GUIApp {
                         self.restore_rx = None;
                     }
 
+                    if let Some(rx) = self.file_dialog_rx.as_ref() {
+                        use std::sync::mpsc::TryRecvError;
+
+                        match rx.try_recv() {
+                            Ok(mut paths) => {
+                                self.selected_folders.append(&mut paths);
+                                self.selected_folders.sort();
+                                self.selected_folders.dedup();
+                                self.file_dialog_rx = None;
+                                self.file_dialog_opening = false;
+                            }
+                            Err(TryRecvError::Disconnected) => {
+                                self.file_dialog_rx = None;
+                                self.file_dialog_opening = false;
+                            }
+                            Err(TryRecvError::Empty) => {
+                                // waiting...
+                            }
+                        }
+                    }
+
                     ui.heading("Konserve");
                     ui.separator();
 
                     // Folder and File Pickers
                     ui.horizontal(|ui| {
                         if ui.button("Add Folders").clicked() {
-                            if let Some(folders) = FileDialog::new().pick_folders() {
-                                self.selected_folders.extend(folders);
-                                self.selected_folders.sort();
-                                self.selected_folders.dedup();
+                            #[cfg(target_os = "macos")]
+                            {
+                                // macOS wants dialogs on the main thread
+                                if let Some(folders) = FileDialog::new().pick_folders() {
+                                    self.selected_folders.extend(folders);
+                                    self.selected_folders.sort();
+                                    self.selected_folders.dedup();
+                                }
+                            }
+
+                            #[cfg(not(target_os = "macos"))]
+                            {
+                                // Linux / Windows: run dialog in a background thread
+                                if self.file_dialog_rx.is_none() {
+                                    self.file_dialog_opening = true;
+
+                                    let (tx, rx) = mpsc::channel::<FileDialogMsg>();
+                                    self.file_dialog_rx = Some(rx);
+
+                                    std::thread::spawn(move || {
+                                        let folders =
+                                            FileDialog::new().pick_folders().unwrap_or_default();
+                                        let _ = tx.send(folders);
+                                    });
+                                }
                             }
                         }
 
                         if ui.button("Add Files").clicked() {
-                            if let Some(files) = FileDialog::new().pick_files() {
-                                self.selected_folders.extend(files);
-                                self.selected_folders.sort();
-                                self.selected_folders.dedup();
+                            #[cfg(target_os = "macos")]
+                            {
+                                if let Some(files) = FileDialog::new().pick_files() {
+                                    self.selected_folders.extend(files);
+                                    self.selected_folders.sort();
+                                    self.selected_folders.dedup();
+                                }
+                            }
+
+                            #[cfg(not(target_os = "macos"))]
+                            {
+                                if self.file_dialog_rx.is_none() {
+                                    self.file_dialog_opening = true;
+
+                                    let (tx, rx) = mpsc::channel::<FileDialogMsg>();
+                                    self.file_dialog_rx = Some(rx);
+
+                                    std::thread::spawn(move || {
+                                        let files =
+                                            FileDialog::new().pick_files().unwrap_or_default();
+                                        let _ = tx.send(files);
+                                    });
+                                }
                             }
                         }
                     });
+
+                    if self.file_dialog_opening {
+                        ui.horizontal(|ui| {
+                            ui.add(egui::Spinner::new().size(12.0));
+                            ui.label("Waiting for file dialog…");
+                        });
+                        ctx.request_repaint_after(std::time::Duration::from_millis(50));
+                    }
 
                     // Show selected paths
                     if !self.selected_folders.is_empty() {
