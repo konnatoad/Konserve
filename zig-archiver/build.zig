@@ -4,26 +4,37 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // ---- static library used by Rust ----
-    const lib = b.addStaticLibrary(.{
+    const lib = b.addLibrary(.{
         .name = "konserve_archiver",
-        .root_source_file = b.path("src/lib.zig"),
-        .target = target,
-        .optimize = optimize,
+        .linkage = .static,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/lib.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
-    // Make it linkable into Rust’s PIE:
+
     lib.root_module.pic = true;
-    // Optional: avoid needing __zig_probe_stack when linked into Rust:
     lib.root_module.stack_check = false;
 
     b.installArtifact(lib);
 
-    // (optional) small CLI for debugging
     const exe = b.addExecutable(.{
         .name = "konserve-archiver",
-        .root_source_file = b.path("src/cli.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/cli.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
+
+    exe.root_module.addImport("konserve_archiver", lib.root_module);
+
     b.installArtifact(exe);
+
+    const run_cmd = b.addRunArtifact(exe);
+    if (b.args) |args| run_cmd.addArgs(args);
+
+    const run_step = b.step("run", "Run the konserve-archiver CLI");
+    run_step.dependOn(&run_cmd.step);
 }
