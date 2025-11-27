@@ -534,7 +534,7 @@ impl eframe::App for GUIApp {
                                 });
                         });
                         ui.vertical(|ui| {
-                            let btn_size = egui::vec2(95.0, 17.0);
+                            let btn_size = egui::vec2(100.0, 17.0);
                             ui.add_sized(btn_size, egui::Button::new("Create Backup"))
                                 .clicked()
                                 .then(|| {
