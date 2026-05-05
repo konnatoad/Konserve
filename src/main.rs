@@ -2,7 +2,7 @@
 //!
 //! Konserve is a simple desktop backup and restore tool
 //!
-//! - Create `.tar` archives, with optional `.tar.gz` compression (WIP)
+//! - Create `.tar` archives
 //! - Select files and folders manually via reusable templates.
 //! - Restore backups to their original destination with a tree view with selections
 //!
@@ -12,7 +12,6 @@
 mod backup;
 mod helpers;
 mod restore;
-mod zigffi;
 
 use backup::backup_gui;
 use helpers::ConflictResolutionMode;
@@ -161,8 +160,7 @@ fn main() -> Result<(), eframe::Error> {
 enum MainTab {
     /// Main screen for selecting files/folders and performing backup/restore.
     Home,
-    /// Settings screen for configuring preferences such as compression
-    /// or conflict resolution.
+    /// Settings screen for configuring preferences such as conflict resolution.
     Settings,
 }
 
@@ -183,11 +181,10 @@ struct GUIApp {
     restore_progress: Option<Progress>,
     restore_opening: bool,
     restore_rx: Option<mpsc::Receiver<RestoreMsg>>,
-    // async file dialog handling for linux being fuck and freezing.
+    // async filedialog handling for linux being fuck and freezing.
     file_dialog_rx: Option<mpsc::Receiver<FileDialogMsg>>,
     file_dialog_opening: bool,
     tab: MainTab,
-    compression_enabled: bool,
     default_backup_location: Option<PathBuf>,
     conflict_resolution_enabled: bool,
     conflict_resolution_mode: ConflictResolutionMode,
@@ -221,7 +218,6 @@ impl Default for GUIApp {
             file_dialog_rx: None,
             file_dialog_opening: false,
             tab: MainTab::Home,
-            compression_enabled: config.compression_enabled,
             default_backup_location: config.default_backup_location.clone(),
             conflict_resolution_enabled: config.conflict_resolution_enabled,
             conflict_resolution_mode: config.conflict_resolution_mode,
@@ -624,23 +620,15 @@ impl eframe::App for GUIApp {
                                         return;
                                     }
 
-                                    if self.compression_enabled {
-                                        *status.lock().unwrap() =
-                                            "Packing into .tar and compressing (gzip)...".into();
-                                    } else {
-                                        *status.lock().unwrap() = "Packing into .tar".into();
-                                    }
+                                    *status.lock().unwrap() = "Packing into .tar".into();
 
                                     let progress = Progress::default();
                                     self.backup_progress = Some(progress.clone());
-
-                                    let compression_enabled = self.compression_enabled;
 
                                     let out_dir = FileDialog::new()
                                         .set_title("Choose backup destination")
                                         .pick_folder();
 
-                                    // Use a Builder to give the compression thread a bigger stack
                                         std::thread::Builder::new()
                                         .name("konserve-backup".into())
                                         .stack_size(8 * 1024 * 1024) // 8 MiB
@@ -648,24 +636,7 @@ impl eframe::App for GUIApp {
                                             if let Some(out_dir) = out_dir {
                                                 match backup_gui(&folders, &out_dir, &progress) {
                                                     Ok(path) => {
-                                                        if compression_enabled {
-                                use std::ffi::CString;
-                                let targz_path = path.with_extension("tar.gz");
-                                let c_in  = CString::new(path.to_string_lossy().as_bytes()).unwrap();
-                                let c_out = CString::new(targz_path.to_string_lossy().as_bytes()).unwrap();
-
-                                unsafe {
-                                    let rc = zigffi::konserve_gzip_tar(c_in.as_ptr(), c_out.as_ptr());
-                                    if rc == 0 {
-                                        let _ = std::fs::remove_file(&path);
-                                        *status.lock().unwrap() = format!("✅ Backup created:\n{}", targz_path.display());
-                                    } else {
-                                        *status.lock().unwrap() = format!("❌ Gzip step failed (code {rc})");
-                                    }
-                                }
-                            } else {
-                                *status.lock().unwrap() = format!("✅ Backup created:\n{}", path.display());
-                            }
+                                                        *status.lock().unwrap() = format!("✅ Backup created:\n{}", path.display());
                         }
                         Err(e) => {
                             *status.lock().unwrap() =
@@ -751,6 +722,9 @@ impl eframe::App for GUIApp {
                             }
                         }
                     }
+                 ui.separator();
+
+                ui.label(format!("Status: {}", self.status.lock().unwrap()));
                 }
 
                 MainTab::Settings => {
@@ -783,8 +757,6 @@ impl eframe::App for GUIApp {
                         });
 
                     ui.separator();
-
-                    ui.checkbox(&mut self.compression_enabled, "Enable Compression (WIP)");
 
                     let mut loc_str = self
                         .default_backup_location
@@ -894,7 +866,6 @@ impl eframe::App for GUIApp {
 
                     if ui.button("Save").clicked() {
                         self.config.verbose_logging = self.verbose_logging;
-                        self.config.compression_enabled = self.compression_enabled;
                         self.config.conflict_resolution_enabled = self.conflict_resolution_enabled;
                         self.config.conflict_resolution_mode = self.conflict_resolution_mode;
                         self.config.default_backup_location = self.default_backup_location.clone();
@@ -906,9 +877,6 @@ impl eframe::App for GUIApp {
                         ctx.request_repaint();
                     }
 
-                    ui.separator();
-
-                    ui.label(format!("Status: {}", self.status.lock().unwrap()));
                 }
             }
         });
