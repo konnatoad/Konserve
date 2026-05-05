@@ -42,9 +42,6 @@ pub struct KonserveConfig {
     /// Enables verbose debug logging when true.
     #[serde(default)]
     pub verbose_logging: bool,
-    /// Enables backup compression (`.tar.gz`).
-    #[serde(default)]
-    pub compression_enabled: bool,
     /// Enables conflict resolution when restoring files.
     #[serde(default)]
     pub conflict_resolution_enabled: bool,
@@ -70,7 +67,6 @@ pub struct KonserveConfig {
 ///
 /// # Defaults
 /// - `verbose_logging`: `false` — disables detailed debug logs
-/// - `compression_enabled`: `false` — compression disabled by default
 /// - `conflict_resolution_enabled`: `false` — conflict resolution off
 /// - `conflict_resolution_mode`: [`ConflictResolutionMode::Prompt`] (default)
 /// - `default_backup_location`: `None` — user must select manually
@@ -80,7 +76,6 @@ impl Default for KonserveConfig {
     fn default() -> Self {
         Self {
             verbose_logging: false,
-            compression_enabled: false,
             conflict_resolution_enabled: false,
             conflict_resolution_mode: super::ConflictResolutionMode::default(),
             default_backup_location: None,
@@ -563,34 +558,15 @@ pub fn adjust_path(original: &Path, current_home: &Path) -> PathBuf {
     original.to_path_buf()
 }
 
-/// Validates whether a stored path exists, adjusting if necessary.
-///
-/// - Uses [`adjust_path`] if the original is invalid.
-/// - Returns `Some(path)` if a usable path is found.
-/// - Returns `None` if both original and adjusted paths are invalid.
-pub fn fix_skip(p: &Path) -> Option<PathBuf> {
-    println!("[DEBUG] fix_skip: Checking path {}", p.display());
-
-    if p.exists() {
-        println!("[DEBUG] -> Path exists, using as-is");
-        return Some(p.to_path_buf());
+pub fn fix_skip(path: &Path) -> Option<PathBuf> {
+    if path.exists() {
+        return Some(path.to_path_buf());
     }
-
-    let current_home = dirs::home_dir()?; // Get the current user's home directory.
-    let adjusted = adjust_path(p, &current_home); // Adjust the path based on the current home directory.
-
+    let current_home = dirs::home_dir()?;
+    let adjusted = adjust_path(path, &current_home);
     if adjusted.exists() {
-        println!(
-            "[DEBUG] -> Adjusted path exists: using {}",
-            adjusted.display()
-        );
         Some(adjusted)
     } else {
-        println!(
-            "[DEBUG] -> Neither original nor adjusted path exists ({} -> {})",
-            p.display(),
-            adjusted.display()
-        );
         None
     }
 }
