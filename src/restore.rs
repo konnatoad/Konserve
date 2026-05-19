@@ -1,4 +1,4 @@
-//! Restore module
+﻿//! Restore module
 //!
 //! Handles extraction of `.tar` backups
 //!
@@ -6,6 +6,7 @@
 //! Reconstructs file paths from UUID mappings
 //! Supports restoring either the entire backup or a subset chosen in the UI
 use crate::helpers::{Progress, adjust_path, get_fingered};
+use crate::dlog;
 use std::{
     collections::{HashMap, HashSet},
     fs::{self, File},
@@ -55,12 +56,13 @@ fn canon<S: AsRef<str>>(s: S) -> String {
 /// # Notes
 /// - The function looks for a `fingerprint.txt` file inside the archive
 ///   to validate the backup and reconstruct UUID mappings.
-/// - Paths are adapted to the current user’s home directory where needed.
+/// - Paths are adapted to the current user's home directory where needed.
 pub fn restore_backup(
     zip_path: &PathBuf,
     selected: Option<Vec<String>>,
     status: Arc<Mutex<String>>,
     progress: &Progress,
+    verbose: bool,
 ) -> Result<(), String> {
     *status.lock().unwrap() = "Restoring backup…".into();
 
@@ -96,7 +98,7 @@ pub fn restore_backup(
         return Err("Invalid backup fingerprint.".into());
     }
 
-    println!("[fingerprint] loaded, {} uuids", path_map.len());
+    if verbose { dlog!("[fingerprint] loaded, {} uuids", path_map.len()); }
 
     let mut to_extract: HashSet<String> = HashSet::new();
 
@@ -154,13 +156,13 @@ pub fn restore_backup(
 
     let mut done: u32 = 0;
 
-    println!("[select]  to_extract = {to_extract:?}");
+    if verbose { dlog!("[select]  to_extract = {to_extract:?}"); }
 
     // Begin extraction
     let current_home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("C:\\"));
     let mut archive = Archive::new(File::open(zip_path).map_err(|e| e.to_string())?);
 
-    println!("[extract] scanning archive…");
+    if verbose { dlog!("[extract] scanning archive…"); }
     let mut restored_count = 0;
 
     for entry_res in archive.entries().map_err(|e| e.to_string())? {
@@ -174,7 +176,7 @@ pub fn restore_backup(
 
         // If selection is archive, skip any non-matching path
         if selected.is_some() && !to_extract.contains(&path_in_tar) {
-            println!("[skip]    {path_in_tar}  (not selected)");
+            if verbose { dlog!("[skip]    {path_in_tar}  (not selected)"); }
             continue;
         }
 
@@ -188,13 +190,13 @@ pub fn restore_backup(
 
         // Case 1: UUID prefix = folder root
         if let Some(orig_base) = path_map.get(&root_component.to_string()) {
-            let adjusted_base = adjust_path(orig_base, &current_home);
+            let adjusted_base = adjust_path(orig_base, &current_home, verbose);
             let rel = tar_path
                 .strip_prefix(Path::new(&root_component as &str))
                 .unwrap_or_else(|_| Path::new(""));
 
             let unpack_to = adjusted_base.join(rel);
-            println!("[write] dir {path_in_tar}  →  {}", unpack_to.display());
+            if verbose { dlog!("[write] dir {path_in_tar}  →  {}", unpack_to.display()); }
 
             if let Some(dir) = unpack_to.parent() {
                 fs::create_dir_all(dir).map_err(|e| e.to_string())?;
@@ -207,8 +209,8 @@ pub fn restore_backup(
         // Case 2: UUID.ext = standalone file
         else if let Some((uuid_part, _ext)) = root_component.split_once('.') {
             if let Some(orig_file) = path_map.get(uuid_part) {
-                let unpack_to = adjust_path(orig_file, &current_home);
-                println!("[write] file {path_in_tar}  →  {}", unpack_to.display());
+                let unpack_to = adjust_path(orig_file, &current_home, verbose);
+                if verbose { dlog!("[write] file {path_in_tar}  →  {}", unpack_to.display()); }
 
                 if let Some(dir) = unpack_to.parent() {
                     fs::create_dir_all(dir).map_err(|e| e.to_string())?;
@@ -218,15 +220,16 @@ pub fn restore_backup(
                 done += 1;
                 progress.set((done * 100) / total_files);
             } else {
-                println!("[skip]    {path_in_tar}  (uuid not in map)");
+                if verbose { dlog!("[skip]    {path_in_tar}  (uuid not in map)"); }
             }
         } else {
-            println!("[skip]    {path_in_tar}  (no handler)");
+            if verbose { dlog!("[skip]    {path_in_tar}  (no handler)"); }
         }
     }
 
-    println!("[done]   restored {restored_count} entries");
+    if verbose { dlog!("[done]   restored {restored_count} entries"); }
     *status.lock().unwrap() = "✅ Restore complete.".into();
     progress.done();
     Ok(())
 }
+
