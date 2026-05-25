@@ -22,6 +22,7 @@ use helpers::fix_skip;
 use helpers::load_icon_image;
 use helpers::parse_fingerprint;
 use helpers::render_tree;
+use helpers::verbose_log_path;
 use restore::restore_backup;
 
 use std::{
@@ -125,13 +126,9 @@ fn build_tree_from_paths(paths: &[String]) -> FolderTreeNode {
 ///
 /// Returns an [`eframe::Error`] if the GUI fails to start.
 fn main() -> Result<(), eframe::Error> {
-    println!("[DEBUG] main: Starting application");
-
     dotenv::dotenv().ok(); // Load environment variables from .env if available
-    println!("[DEBUG] .env loaded (if present)");
 
     let icon = load_icon_image(); // Load application image
-    println!("[DEBUG] Icon loaded");
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -140,16 +137,11 @@ fn main() -> Result<(), eframe::Error> {
             .with_icon(icon),
         ..Default::default()
     };
-    println!("[DEBUG] NativeOptions configured");
 
-    println!("[DEBUG] Launching GUI with run_native");
     eframe::run_native(
         "Konserve",
         options,
-        Box::new(|_cc| {
-            println!("[DEBUG] GUIApp::default() instantiated");
-            Ok(Box::new(GUIApp::default()))
-        }),
+        Box::new(|_cc| Ok(Box::new(GUIApp::default()))),
     )
 }
 
@@ -202,7 +194,7 @@ struct GUIApp {
 impl Default for GUIApp {
     fn default() -> Self {
         let config = helpers::KonserveConfig::load();
-        Self {
+        let app = Self {
             status: Arc::new(Mutex::new("Waiting...".to_string())),
             selected_folders: Vec::new(),
             template_editor: false,
@@ -225,7 +217,11 @@ impl Default for GUIApp {
             automatic_updates: config.automatic_updates,
             file_size_summary: false,
             config,
+        };
+        if app.verbose_logging {
+            helpers::init_verbose_log();
         }
+        app
     }
 }
 
@@ -353,7 +349,7 @@ impl eframe::App for GUIApp {
                     .max_height(300.0)
                     .show(ui, |ui| {
                         let mut current_path = vec![];
-                        render_tree(ui, &mut current_path, &mut self.restore_tree)
+                        render_tree(ui, &mut current_path, &mut self.restore_tree, self.verbose_logging)
                     });
 
                 ui.separator();
@@ -361,18 +357,19 @@ impl eframe::App for GUIApp {
                 if ui.button("Restore selected").clicked() {
                     if let Some(zip_path) = &self.restore_zip_path.clone() {
                         // Collect selected paths from the restore tree
-                        let selected = collect_paths(&self.restore_tree);
+                        let selected = collect_paths(&self.restore_tree, self.verbose_logging);
                         let zip_path = zip_path.clone();
                         let status = self.status.clone();
 
                         let progress = Progress::default();
                         self.restore_progress = Some(progress.clone());
                         self.restore_opening = false;
+                        let verbose = self.verbose_logging;
 
                         thread::spawn(move || {
                             // Show spinner right away
                             if let Err(e) =
-                                restore_backup(&zip_path, Some(selected), status.clone(), &progress)
+                                restore_backup(&zip_path, Some(selected), status.clone(), &progress, verbose)
                             {
                                 *status.lock().unwrap() = format!("❌ Restore failed: {e}");
                             }
@@ -555,8 +552,9 @@ impl eframe::App for GUIApp {
                                                 let mut valid = Vec::new();
                                                 let mut skipped = Vec::new();
 
+                                                let verbose = self.verbose_logging;
                                                 for p in template.paths {
-                                                    match fix_skip(&p) {
+                                                    match fix_skip(&p, verbose) {
                                                         Some(adjusted) => valid.push(adjusted),
                                                         None => skipped.push(p),
                                                     }
@@ -624,6 +622,7 @@ impl eframe::App for GUIApp {
 
                                     let progress = Progress::default();
                                     self.backup_progress = Some(progress.clone());
+                                    let verbose = self.verbose_logging;
 
                                     let out_dir = FileDialog::new()
                                         .set_title("Choose backup destination")
@@ -634,7 +633,7 @@ impl eframe::App for GUIApp {
                                         .stack_size(8 * 1024 * 1024) // 8 MiB
                                     .spawn(move || {
                                             if let Some(out_dir) = out_dir {
-                                                match backup_gui(&folders, &out_dir, &progress) {
+                                                match backup_gui(&folders, &out_dir, &progress, verbose) {
                                                     Ok(path) => {
                                                         *status.lock().unwrap() = format!("✅ Backup created:\n{}", path.display());
                         }
@@ -664,12 +663,13 @@ impl eframe::App for GUIApp {
                                         // This will be used to send the result of the restore operation
                                         let (tx, rx) = mpsc::channel::<RestoreMsg>();
                                         self.restore_rx = Some(rx);
+                                        let verbose = self.verbose_logging;
 
                                         thread::spawn(move || {
-                                            let result: RestoreMsg = parse_fingerprint(&zip_file)
+                                            let result: RestoreMsg = parse_fingerprint(&zip_file, verbose)
                                                 .map(|(entries, map)| {
                                                     (
-                                                        build_human_tree(entries, map),
+                                                        build_human_tree(entries, map, verbose),
                                                         zip_file.clone(),
                                                     )
                                                 });
@@ -745,7 +745,7 @@ impl eframe::App for GUIApp {
                                         self.template_paths = template
                                             .paths
                                             .into_iter()
-                                            .map(|p| fix_skip(&p).unwrap_or(p))
+                                            .map(|p| fix_skip(&p, self.verbose_logging).unwrap_or(p))
                                             .collect();
                                         self.template_editor = true;
                                     } else {
@@ -801,7 +801,25 @@ impl eframe::App for GUIApp {
                             });
                     }
 
-                    ui.checkbox(&mut self.verbose_logging, "Enable Verbose Logging (WIP)");
+                    ui.horizontal(|ui| {
+                        let resp = ui.checkbox(&mut self.verbose_logging, "Enable Verbose Logging");
+                        if resp.changed() {
+                            if self.verbose_logging {
+                                helpers::init_verbose_log();
+                            } else {
+                                helpers::close_verbose_log();
+                            }
+                        }
+                        if self.verbose_logging {
+                            if ui.small_button("Open Log").clicked() {
+                                let path = verbose_log_path();
+                                #[cfg(target_os = "windows")]
+                                let _ = std::process::Command::new("explorer").arg(&path).spawn();
+                                #[cfg(not(target_os = "windows"))]
+                                let _ = std::process::Command::new("open").arg(&path).spawn();
+                            }
+                        }
+                    });
 
                     ui.checkbox(
                         &mut self.automatic_updates,

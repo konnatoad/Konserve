@@ -1,4 +1,4 @@
-//! # Helpers Module
+﻿//! # Helpers Module
 //!
 //! Provides shared utilities for the app, including:
 //! - Persistent configuration handling (`KonserveConfig`)
@@ -17,15 +17,67 @@ use egui::CollapsingHeader;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
-    fs::{self, File},
-    io::Read,
+    fs::{self, File, OpenOptions},
+    io::{Read, Write},
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU32, Ordering},
     },
 };
+use chrono::Local;
 use tar::Archive;
+
+static DEBUG_LOG: Mutex<Option<File>> = Mutex::new(None);
+
+/// Returns the path of the verbose log file.
+pub fn verbose_log_path() -> PathBuf {
+    KonserveConfig::config_path()
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join("konserve.log")
+}
+
+/// Opens (and truncates) the verbose log file next to the config.
+/// Called when verbose logging is enabled (at startup or when the checkbox is ticked).
+pub fn init_verbose_log() {
+    let path = verbose_log_path();
+    if let Some(dir) = path.parent() {
+        let _ = fs::create_dir_all(dir);
+    }
+    if let Ok(f) = OpenOptions::new().create(true).truncate(true).write(true).open(&path) {
+        if let Ok(mut guard) = DEBUG_LOG.lock() {
+            *guard = Some(f);
+        }
+    }
+}
+
+/// Closes the log file handle and deletes the log file.
+/// Called when verbose logging is disabled via the checkbox.
+pub fn close_verbose_log() {
+    if let Ok(mut guard) = DEBUG_LOG.lock() {
+        *guard = None;
+    }
+    let _ = fs::remove_file(verbose_log_path());
+}
+
+/// Write a debug message to stdout (if available) and with a timestamp to the log file.
+pub fn write_dlog(msg: &str) {
+    println!("{msg}");
+    if let Ok(mut guard) = DEBUG_LOG.lock() {
+        if let Some(ref mut f) = *guard {
+            let ts = Local::now().format("%Y-%m-%d %H:%M:%S");
+            let _ = writeln!(f, "[{ts}] {msg}");
+        }
+    }
+}
+
+#[macro_export]
+macro_rules! dlog {
+    ($($arg:tt)*) => {
+        $crate::helpers::write_dlog(&format!($($arg)*))
+    }
+}
 
 /// Persistent configuration object for Konserve.
 ///
@@ -91,7 +143,7 @@ impl KonserveConfig {
     /// Priority order for the base directory:
     /// 1. `$XDG_CONFIG_HOME` (preferred)
     /// 2. `$XDG_DATA_HOME` or equivalent data directory
-    /// 3. The user’s home directory
+    /// 3. The user's home directory
     /// 4. Current working directory (`.`) as a fallback
     ///
     /// The final path will always be:
@@ -123,7 +175,6 @@ impl KonserveConfig {
         let path = Self::config_path();
         if let Ok(data) = fs::read_to_string(&path) {
             if let Ok(cfg) = serde_json::from_str(&data) {
-                println!("[DEBUG] Loading config from {}", path.display());
                 return cfg;
             }
         }
@@ -154,7 +205,6 @@ impl KonserveConfig {
                 if let Err(e) = fs::write(&path, json) {
                     eprintln!("[ERROR] Failed to save config: {e}");
                 }
-                println!("[DEBUG] Saved config to {}", path.display());
             }
             Err(e) => {
                 eprintln!("[ERROR] Failed to serialize config: {e}");
@@ -229,26 +279,16 @@ impl Default for Progress {
 /// # Returns
 /// An [`Arc<IconData>`] containing the icon.
 pub fn load_icon_image() -> Arc<IconData> {
-    println!("[DEBUG] load_icon_image: Start");
-
     let image_bytes = include_bytes!("../assets/icon.png");
-    println!("[DEBUG] Icon bytes loaded: {} bytes", image_bytes.len());
-
     let image = image::load_from_memory(image_bytes)
         .expect("Icon image couldn't be loaded")
         .into_rgba8();
-
     let (w, h) = image.dimensions();
-    println!("[DEBUG] Icon dimensions: {w}x{h}");
-
-    let icon_data = Arc::new(IconData {
+    Arc::new(IconData {
         rgba: image.into_raw(),
         width: w,
         height: h,
-    });
-
-    println!("[DEBUG] load_icon_image: Done");
-    icon_data
+    })
 }
 
 /// Recursively toggles the checked state of a folder node and all its children.
@@ -258,16 +298,17 @@ pub fn load_icon_image() -> Arc<IconData> {
 ///
 /// - `node`: The current tree node.
 /// - `checked`: Desired checkbox state.
-fn set_all_checked(node: &mut FolderTreeNode, checked: bool) {
-    println!(
-        "[DEBUG] set_all_checked: Setting node (is_file: {}) to checked = {}",
-        node.is_file, checked
-    );
-
+fn set_all_checked(node: &mut FolderTreeNode, checked: bool, verbose: bool) {
+    if verbose {
+        dlog!(
+            "[DEBUG] set_all_checked: Setting node (is_file: {}) to checked = {}",
+            node.is_file, checked
+        );
+    }
     node.checked = checked;
     for (name, child) in node.children.iter_mut() {
-        println!("[DEBUG]   -> Descending into child: \"{name}\"");
-        set_all_checked(child, checked);
+        if verbose { dlog!("[DEBUG]   -> Descending into child: \"{name}\""); }
+        set_all_checked(child, checked, verbose);
     }
 }
 
@@ -279,7 +320,7 @@ fn set_all_checked(node: &mut FolderTreeNode, checked: bool) {
 /// - `ui`: egui UI handle for rendering.
 /// - `path`: Mutable path stack for recursion.
 /// - `node`: Current folder node to render.
-pub fn render_tree(ui: &mut egui::Ui, path: &mut Vec<String>, node: &mut FolderTreeNode) {
+pub fn render_tree(ui: &mut egui::Ui, path: &mut Vec<String>, node: &mut FolderTreeNode, verbose: bool) {
     for (name, child) in node.children.iter_mut() {
         let mut label = name.clone();
         if !child.is_file {
@@ -299,17 +340,19 @@ pub fn render_tree(ui: &mut egui::Ui, path: &mut Vec<String>, node: &mut FolderT
             // Folder node with children
             ui.horizontal(|ui| {
                 if ui.checkbox(&mut child.checked, "").changed() {
-                    println!(
-                        "[DEBUG] Checkbox changed: setting all children of \"{}\" to {}",
-                        current_path, child.checked
-                    );
-                    set_all_checked(child, child.checked);
+                    if verbose {
+                        dlog!(
+                            "[DEBUG] Checkbox changed: setting all children of \"{}\" to {}",
+                            current_path, child.checked
+                        );
+                    }
+                    set_all_checked(child, child.checked, verbose);
                 }
                 CollapsingHeader::new(label)
                     .default_open(false)
                     .show(ui, |ui| {
                         // Render the children of the current node recursively.
-                        render_tree(ui, path, child);
+                        render_tree(ui, path, child, verbose);
                     });
             });
 
@@ -333,12 +376,13 @@ pub fn render_tree(ui: &mut egui::Ui, path: &mut Vec<String>, node: &mut FolderT
 pub fn build_human_tree(
     entries: Vec<String>,
     path_map: HashMap<String, PathBuf>,
+    verbose: bool,
 ) -> FolderTreeNode {
-    println!("[DEBUG] build_human_tree: Start");
+    if verbose { dlog!("[DEBUG] build_human_tree: Start"); }
     let mut root = FolderTreeNode::default();
 
     for (uuid, original_path) in path_map {
-        println!("[DEBUG] Processing UUID: {uuid}, Path: {original_path:?}");
+        if verbose { dlog!("[DEBUG] Processing UUID: {uuid}, Path: {original_path:?}"); }
 
         let parent_label = original_path
             .parent()
@@ -351,7 +395,7 @@ pub fn build_human_tree(
             .to_string_lossy()
             .to_string();
 
-        println!("[DEBUG] parent_label = \"{parent_label}\", item_name = \"{item_name}\"");
+        if verbose { dlog!("[DEBUG] parent_label = \"{parent_label}\", item_name = \"{item_name}\""); }
 
         let parent_node = root
             .children
@@ -367,23 +411,23 @@ pub fn build_human_tree(
         let is_dir_backup = entries.iter().any(|e| e.starts_with(&dir_prefix)); // Check if there are any entries that start with the UUID prefix.
 
         if is_dir_backup {
-            println!("[DEBUG] Detected directory backup for UUID: {uuid}");
+            if verbose { dlog!("[DEBUG] Detected directory backup for UUID: {uuid}"); }
             parent_node.children.get_mut(&item_name).unwrap().is_file = false;
 
             for tar_path in entries.iter().filter(|e| e.starts_with(&dir_prefix)) {
-                println!("[DEBUG]   tar_path = \"{tar_path}\"");
+                if verbose { dlog!("[DEBUG]   tar_path = \"{tar_path}\""); }
 
                 let rest = tar_path[dir_prefix.len()..].trim_end_matches('/');
                 if rest.is_empty() {
-                    println!("[DEBUG]   Skipping empty rest after trim");
+                    if verbose { dlog!("[DEBUG]   Skipping empty rest after trim"); }
                     continue;
                 }
 
-                println!("[DEBUG]   Rest path: \"{rest}\"");
+                if verbose { dlog!("[DEBUG]   Rest path: \"{rest}\""); }
 
                 let mut cursor = parent_node.children.get_mut(&item_name).unwrap(); // Get the item
                 for part in rest.split('/') {
-                    println!("[DEBUG]     Descending into part: \"{part}\"");
+                    if verbose { dlog!("[DEBUG]     Descending into part: \"{part}\""); }
                     cursor = cursor
                         .children
                         .entry(part.to_string())
@@ -392,27 +436,27 @@ pub fn build_human_tree(
                 cursor.is_file = true;
             }
         } else {
-            println!("[DEBUG] Detected file (not dir) for UUID: {uuid}");
+            if verbose { dlog!("[DEBUG] Detected file (not dir) for UUID: {uuid}"); }
             parent_node.children.get_mut(&item_name).unwrap().is_file = true;
         }
     }
 
-    println!("[DEBUG] build_human_tree: Finished building tree");
+    if verbose { dlog!("[DEBUG] build_human_tree: Finished building tree"); }
     root
 }
 
 /// Recursively traverses a [`FolderTreeNode`] tree,
 /// collecting all checked file paths into a flat list.
-pub fn collect_recursive(node: &FolderTreeNode, path: &mut Vec<String>, output: &mut Vec<String>) {
+pub fn collect_recursive(node: &FolderTreeNode, path: &mut Vec<String>, output: &mut Vec<String>, verbose: bool) {
     for (name, child) in &node.children {
         path.push(name.clone());
         if child.is_file && child.checked {
             let full_path = path.join("/");
-            println!("[DEBUG] collect_recursive: Adding checked file {full_path}");
+            if verbose { dlog!("[DEBUG] collect_recursive: Adding checked file {full_path}"); }
             output.push(full_path);
         }
 
-        collect_recursive(child, path, output);
+        collect_recursive(child, path, output, verbose);
         path.pop();
     }
 }
@@ -420,15 +464,12 @@ pub fn collect_recursive(node: &FolderTreeNode, path: &mut Vec<String>, output: 
 /// Convenience wrapper around [`collect_recursive`].
 ///
 /// Collects all checked paths from the root node.
-pub fn collect_paths(root: &FolderTreeNode) -> Vec<String> {
-    println!("[DEBUG] collect_paths: Start");
+pub fn collect_paths(root: &FolderTreeNode, verbose: bool) -> Vec<String> {
+    if verbose { dlog!("[DEBUG] collect_paths: Start"); }
     let mut result = Vec::new();
     let mut path = Vec::new();
-    collect_recursive(root, &mut path, &mut result);
-    println!(
-        "[DEBUG] collect_paths: Done, collected {} paths",
-        result.len()
-    );
+    collect_recursive(root, &mut path, &mut result, verbose);
+    if verbose { dlog!("[DEBUG] collect_paths: Done, collected {} paths", result.len()); }
     result
 }
 
@@ -442,17 +483,15 @@ pub fn collect_paths(root: &FolderTreeNode) -> Vec<String> {
 /// Returns `Err` if the archive is invalid or fingerprint is missing.
 pub fn parse_fingerprint(
     zip_path: &PathBuf,
+    verbose: bool,
 ) -> Result<(Vec<String>, HashMap<String, PathBuf>), String> {
-    println!(
-        "[DEBUG] parse_fingerprint: Opening archive at {}",
-        zip_path.display()
-    );
+    if verbose { dlog!("[DEBUG] parse_fingerprint: Opening archive at {}", zip_path.display()); }
 
     let file = File::open(zip_path).map_err(|e| e.to_string())?;
     let mut archive = Archive::new(file);
     let mut path_map = HashMap::new();
 
-    println!("[DEBUG] Scanning for fingerprint.txt…");
+    if verbose { dlog!("[DEBUG] Scanning for fingerprint.txt…"); }
 
     // Phase 1: extract fingerprint map
     for entry in archive.entries().map_err(|e| e.to_string())? {
@@ -461,20 +500,20 @@ pub fn parse_fingerprint(
         let name = header_path.to_string_lossy();
 
         if name == "fingerprint.txt" {
-            println!("[DEBUG] Found fingerprint.txt");
+            if verbose { dlog!("[DEBUG] Found fingerprint.txt"); }
             let mut txt = String::new();
             entry.read_to_string(&mut txt).map_err(|e| e.to_string())?;
 
             for line in txt.lines().filter(|l| l.contains(": ")) {
                 let (uuid, p) = line.split_once(": ").unwrap();
-                println!("[DEBUG]   Parsed fingerprint: {} → {}", uuid, p.trim());
+                if verbose { dlog!("[DEBUG]   Parsed fingerprint: {} → {}", uuid, p.trim()); }
                 path_map.insert(uuid.to_string(), PathBuf::from(p.trim()));
             }
             break;
         }
     }
 
-    println!("[DEBUG] Re-opening archive to collect entries");
+    if verbose { dlog!("[DEBUG] Re-opening archive to collect entries"); }
 
     // Phase 2: list remaining archive contents
     let file = File::open(zip_path).map_err(|e| e.to_string())?;
@@ -488,15 +527,17 @@ pub fn parse_fingerprint(
 
         if entry_name != "fingerprint.txt" {
             entries.push(entry_name.clone());
-            println!("[DEBUG]   Found entry: {entry_name}");
+            if verbose { dlog!("[DEBUG]   Found entry: {entry_name}"); }
         }
     }
 
-    println!(
-        "[DEBUG] parse_fingerprint: Done. {} entries, {} fingerprinted",
-        entries.len(),
-        path_map.len()
-    );
+    if verbose {
+        dlog!(
+            "[DEBUG] parse_fingerprint: Done. {} entries, {} fingerprinted",
+            entries.len(),
+            path_map.len()
+        );
+    }
 
     Ok((entries, path_map))
 }
@@ -508,16 +549,9 @@ pub fn parse_fingerprint(
 /// Defaults to `"DEFAULT_FINGERPRINT"` if not set.
 pub fn get_fingered() -> &'static str {
     const DEFAULT: &str = "DEFAULT_FINGERPRINT";
-
     match option_env!("FINGERPRINT") {
-        Some(val) => {
-            println!("get_fingered: using embedded fingerprint = \"{val}\"");
-            val
-        }
-        None => {
-            println!("get_fingered: no embedded fingerprint found, fallback \"{DEFAULT}\"");
-            DEFAULT
-        }
+        Some(val) => val,
+        None => DEFAULT,
     }
 }
 
@@ -531,42 +565,45 @@ pub fn get_fingered() -> &'static str {
 /// - `current_home`: Current user's home directory.
 ///
 /// Returns the adjusted path.
-pub fn adjust_path(original: &Path, current_home: &Path) -> PathBuf {
+pub fn adjust_path(original: &Path, current_home: &Path, verbose: bool) -> PathBuf {
     let og_str = original.to_string_lossy();
     let current_str = current_home.to_string_lossy();
 
-    println!("[DEBUG] adjust_path: original = {og_str}");
-    println!("[DEBUG] adjust_path: current_home = {current_str}");
+    if verbose {
+        dlog!("[DEBUG] adjust_path: original = {og_str}");
+        dlog!("[DEBUG] adjust_path: current_home = {current_str}");
+    }
 
     if og_str.to_lowercase().starts_with("c:\\users\\") {
         let parts: Vec<&str> = og_str.split('\\').collect();
         if parts.len() > 2 {
             let old_username = parts[2];
             let expected_prefix = format!("C:\\Users\\{old_username}");
-            println!("[DEBUG] Detected old user prefix: {expected_prefix}");
+            if verbose { dlog!("[DEBUG] Detected old user prefix: {expected_prefix}"); }
 
             if og_str.starts_with(&expected_prefix) {
                 let rel_path = og_str.strip_prefix(&expected_prefix).unwrap_or("");
                 let adjusted = format!("{current_str}{rel_path}");
-                println!("[DEBUG] Path adjusted: {og_str} → {adjusted}");
+                if verbose { dlog!("[DEBUG] Path adjusted: {og_str} → {adjusted}"); }
                 return PathBuf::from(adjusted);
             }
         }
     }
 
-    println!("[DEBUG] No adjustment needed");
+    if verbose { dlog!("[DEBUG] No adjustment needed"); }
     original.to_path_buf()
 }
 
-pub fn fix_skip(path: &Path) -> Option<PathBuf> {
+pub fn fix_skip(path: &Path, verbose: bool) -> Option<PathBuf> {
     if path.exists() {
         return Some(path.to_path_buf());
     }
     let current_home = dirs::home_dir()?;
-    let adjusted = adjust_path(path, &current_home);
+    let adjusted = adjust_path(path, &current_home, verbose);
     if adjusted.exists() {
         Some(adjusted)
     } else {
         None
     }
 }
+

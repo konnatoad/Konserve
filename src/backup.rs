@@ -1,4 +1,4 @@
-//! # Backup Module
+﻿//! # Backup Module
 //!
 //! Handles creation of `.tar` backup archives
 //!
@@ -13,6 +13,7 @@
 //! - Current format is `.tar`. `.tar.gz` support is planned but not yet active.
 //! - Old `.zip` format is deprecated and left as commented legacy code.
 use crate::helpers::{Progress, get_fingered};
+use crate::dlog;
 use std::{
     fs::File,
     io,
@@ -77,15 +78,18 @@ pub fn backup_gui(
     folders: &[PathBuf],
     output_dir: &Path,
     progress: &Progress,
+    verbose: bool,
 ) -> Result<PathBuf, String> {
-    println!("[DEBUG] backup_gui: Started");
-    println!("[DEBUG] Output directory: {}", output_dir.display());
+    if verbose {
+        dlog!("[DEBUG] backup_gui: Started");
+        dlog!("[DEBUG] Output directory: {}", output_dir.display());
+    }
 
     // Format backup name with timestamp
     let timestamp = Local::now().format("%Y-%m-%d_%H-%M-%S");
     let zip_name = format!("backup_{timestamp}.tar");
     let zip_path = output_dir.join(&zip_name);
-    println!("[DEBUG] Creating backup archive: {}", zip_path.display());
+    if verbose { dlog!("[DEBUG] Creating backup archive: {}", zip_path.display()); }
 
     let tar_file = File::create(&zip_path).map_err(|e| e.to_string())?;
     let mut tar_builder = Builder::new(tar_file);
@@ -98,7 +102,7 @@ pub fn backup_gui(
         .iter()
         .map(|folder| {
             let uuid = Uuid::new_v4();
-            println!("[DEBUG] Assigned UUID {} to {}", uuid, folder.display());
+            if verbose { dlog!("[DEBUG] Assigned UUID {} to {}", uuid, folder.display()); }
             (uuid, folder)
         })
         .collect();
@@ -132,13 +136,13 @@ pub fn backup_gui(
             fingerprint_content.as_bytes(),
         )
         .map_err(|e| e.to_string())?;
-    println!("[DEBUG] fingerprint.txt added to archive");
+    if verbose { dlog!("[DEBUG] fingerprint.txt added to archive"); }
 
     // === Main archive population ===
     for (uuid, original_path) in folder_uuid {
         if original_path.is_file() {
             // Top-level file (not inside folder): encode directly using UUID as name
-            println!("[DEBUG] Adding single file: {}", original_path.display());
+            if verbose { dlog!("[DEBUG] Adding single file: {}", original_path.display()); }
 
             let metadata = original_path.metadata().map_err(|e| e.to_string())?;
             let mut header = Header::new_gnu();
@@ -151,7 +155,7 @@ pub fn backup_gui(
                 Some(ext) => format!("{uuid}.{ext}"),
                 None => uuid.to_string(),
             };
-            println!("[DEBUG] -> Entry name in tar: {entry_name}");
+            if verbose { dlog!("[DEBUG] -> Entry name in tar: {entry_name}"); }
 
             tar_builder
                 .append_data(&mut header, entry_name, &mut f)
@@ -164,7 +168,7 @@ pub fn backup_gui(
         }
 
         // Handle directory entries (recursive walk)
-        println!("[DEBUG] Walking folder: {}", original_path.display());
+        if verbose { dlog!("[DEBUG] Walking folder: {}", original_path.display()); }
 
         for entry in WalkDir::new(original_path)
             .into_iter()
@@ -182,7 +186,7 @@ pub fn backup_gui(
             header.set_cksum();
 
             if metadata.is_file() {
-                println!("[DEBUG] Adding file: {}", entry_path.display());
+                if verbose { dlog!("[DEBUG] Adding file: {}", entry_path.display()); }
                 let mut file = File::open(entry_path).map_err(|e| e.to_string())?;
                 tar_builder
                     .append_data(&mut header, tar_entry_path, &mut file)
@@ -192,7 +196,7 @@ pub fn backup_gui(
                 progress.set(done * 100 / total_files);
             } else if metadata.is_dir() {
                 // Directory entries are included for structure but written as empty
-                println!("[DEBUG] Adding directory: {}", entry_path.display());
+                if verbose { dlog!("[DEBUG] Adding directory: {}", entry_path.display()); }
                 tar_builder
                     .append_data(&mut header, tar_entry_path, io::empty())
                     .map_err(|e| e.to_string())?;
@@ -202,7 +206,7 @@ pub fn backup_gui(
 
     // Finalize and flush .tar structure to disk
     tar_builder.finish().map_err(|e| e.to_string())?;
-    println!("[DEBUG] Archive finished: {}", zip_path.display());
+    if verbose { dlog!("[DEBUG] Archive finished: {}", zip_path.display()); }
 
     progress.done();
 
@@ -267,3 +271,4 @@ pub fn backup_gui(
 //     zip.finish().unwrap();
 //     Ok(zip_path)
 // }
+
