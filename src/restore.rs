@@ -86,8 +86,9 @@ pub fn restore_backup(
                 valid_fingerprint = true;
 
                 for line in txt.lines().filter(|l| l.contains(": ")) {
-                    let (uuid, p) = line.split_once(": ").unwrap();
-                    path_map.insert(uuid.to_string(), PathBuf::from(p.trim()));
+                    if let Some((uuid, p)) = line.split_once(": ") {
+                        path_map.insert(uuid.to_string(), PathBuf::from(p.trim()));
+                    }
                 }
             }
             break;
@@ -107,7 +108,7 @@ pub fn restore_backup(
 
         for (uuid, orig) in &path_map {
             let parent_c = canon(orig.parent().unwrap_or(orig).display().to_string());
-            let item_name = orig.file_name().unwrap().to_string_lossy();
+            let item_name = orig.file_name().unwrap_or_default().to_string_lossy();
             let base = format!("{parent_c}/{item_name}");
 
             if human_sel.contains(&base) {
@@ -181,18 +182,19 @@ pub fn restore_backup(
         }
 
         let tar_path = Path::new(&path_in_tar);
-        let root_component = tar_path
-            .components()
-            .next()
-            .unwrap()
-            .as_os_str()
-            .to_string_lossy();
+        let root_component = match tar_path.components().next() {
+            Some(c) => c.as_os_str().to_string_lossy().into_owned(),
+            None => {
+                if verbose { dlog!("[skip]    {path_in_tar}  (empty path)"); }
+                continue;
+            }
+        };
 
         // Case 1: UUID prefix = folder root
-        if let Some(orig_base) = path_map.get(&root_component.to_string()) {
+        if let Some(orig_base) = path_map.get(&root_component) {
             let adjusted_base = adjust_path(orig_base, &current_home, verbose);
             let rel = tar_path
-                .strip_prefix(Path::new(&root_component as &str))
+                .strip_prefix(Path::new(&root_component))
                 .unwrap_or_else(|_| Path::new(""));
 
             let unpack_to = adjusted_base.join(rel);

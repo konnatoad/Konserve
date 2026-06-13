@@ -409,7 +409,7 @@ impl eframe::App for GUIApp {
                                 self.restore_editor = true;
                             }
                             Err(e) => {
-                                *self.status.lock().unwrap() = format!("Failed: {e}");
+                                *self.status.lock().unwrap() = format!("❌ Failed to open archive: {e}");
                             }
                         }
                         self.restore_rx = None;
