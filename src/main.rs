@@ -240,8 +240,7 @@ impl eframe::App for GUIApp {
     /// # Parameters
     /// - `ctx`: egui context used to render the UI.
     /// - `_frame`: Frame handle (unused here).
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show(ctx, |ui| {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
             ui.horizontal(|ui| {
                 if ui
                     .selectable_label(self.tab == MainTab::Home, "Home")
@@ -504,7 +503,7 @@ impl eframe::App for GUIApp {
                             ui.add(egui::Spinner::new().size(12.0));
                             ui.label("Waiting for file dialog…");
                         });
-                        ctx.request_repaint_after(std::time::Duration::from_millis(50));
+                        ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
                     }
 
                     // Show selected paths
@@ -686,7 +685,7 @@ impl eframe::App for GUIApp {
                             ui.add(egui::Spinner::new().size(16.0)); // 16 px is default
                             ui.label("Opening archive…");
                         });
-                        ctx.request_repaint_after(std::time::Duration::from_millis(30));
+                        ui.ctx().request_repaint_after(std::time::Duration::from_millis(30));
                     }
 
                     for opt in [&mut self.backup_progress, &mut self.restore_progress]
@@ -714,7 +713,7 @@ impl eframe::App for GUIApp {
                                         "Restoring..."
                                     };
                                     ui.label(progress_status);
-                                    ctx.request_repaint_after(std::time::Duration::from_millis(4));
+                                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(4));
                                 }
                                 _ => {
                                     *p_opt = None;
@@ -892,12 +891,11 @@ impl eframe::App for GUIApp {
 
                         self.config.save();
                         *self.status.lock().unwrap() = "Settings saved".into();
-                        ctx.request_repaint();
+                        ui.ctx().request_repaint();
                     }
 
                 }
             }
-        });
-        ctx.request_repaint_after(std::time::Duration::from_millis(500));
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
     }
 }
