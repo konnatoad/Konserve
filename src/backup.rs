@@ -77,6 +77,7 @@ struct BackupTemplate {
 pub fn backup_gui(
     folders: &[PathBuf],
     output_dir: &Path,
+    filename: &str,
     progress: &Progress,
     verbose: bool,
 ) -> Result<PathBuf, String> {
@@ -85,10 +86,7 @@ pub fn backup_gui(
         dlog!("[DEBUG] Output directory: {}", output_dir.display());
     }
 
-    // Format backup name with timestamp
-    let timestamp = Local::now().format("%Y-%m-%d_%H-%M-%S");
-    let zip_name = format!("backup_{timestamp}.tar");
-    let zip_path = output_dir.join(&zip_name);
+    let zip_path = output_dir.join(filename);
     if verbose { dlog!("[DEBUG] Creating backup archive: {}", zip_path.display()); }
 
     let tar_file = File::create(&zip_path).map_err(|e| e.to_string())?;

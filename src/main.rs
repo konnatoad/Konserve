@@ -14,6 +14,7 @@ mod helpers;
 mod restore;
 
 use backup::backup_gui;
+use helpers::BackupNameMode;
 use helpers::ConflictResolutionMode;
 use helpers::Progress;
 use helpers::build_human_tree;
@@ -33,6 +34,7 @@ use std::{
     thread,
 };
 
+use chrono::Local;
 use eframe::egui;
 use rfd::FileDialog;
 use serde::{Deserialize, Serialize};
@@ -183,6 +185,11 @@ struct GUIApp {
     verbose_logging: bool,
     automatic_updates: bool,
     file_size_summary: bool,
+    save_to_exe_dir: bool,
+    backup_name_mode: BackupNameMode,
+    // temporary string buffer for the name input in settings
+    backup_name_input: String,
+    overwrite_confirm: Option<PathBuf>,
     config: helpers::KonserveConfig,
 }
 
@@ -216,6 +223,12 @@ impl Default for GUIApp {
             verbose_logging: config.verbose_logging,
             automatic_updates: config.automatic_updates,
             file_size_summary: false,
+            save_to_exe_dir: config.save_to_exe_dir,
+            backup_name_input: match &config.backup_name_mode {
+                BackupNameMode::Timestamp(s) | BackupNameMode::Fixed(s) => s.clone(),
+            },
+            backup_name_mode: config.backup_name_mode.clone(),
+            overwrite_confirm: None,
             config,
         };
         if app.verbose_logging {
@@ -255,6 +268,41 @@ impl eframe::App for GUIApp {
                     self.tab = MainTab::Settings;
                 }
             });
+
+            // Overwrite confirmation dialog for fixed backup names
+            if let Some(ref dest) = self.overwrite_confirm.clone() {
+                ui.separator();
+                ui.colored_label(egui::Color32::YELLOW, format!("⚠ '{}' already exists. Overwrite?", dest.file_name().unwrap_or_default().to_string_lossy()));
+                ui.horizontal(|ui| {
+                    if ui.button("Yes, overwrite").clicked() {
+                        let dest = dest.clone();
+                        let folders = self.selected_folders.clone();
+                        let status = self.status.clone();
+                        let progress = Progress::default();
+                        self.backup_progress = Some(progress.clone());
+                        let verbose = self.verbose_logging;
+                        let out_dir = dest.parent().unwrap().to_path_buf();
+                        let filename = dest.file_name().unwrap().to_string_lossy().into_owned();
+                        self.overwrite_confirm = None;
+                        *status.lock().unwrap() = "Packing into .tar".into();
+                        std::thread::Builder::new()
+                            .name("konserve-backup".into())
+                            .stack_size(8 * 1024 * 1024)
+                            .spawn(move || {
+                                match backup_gui(&folders, &out_dir, &filename, &progress, verbose) {
+                                    Ok(path) => { *status.lock().unwrap() = format!("✅ Backup created:\n{}", path.display()); }
+                                    Err(e) => { *status.lock().unwrap() = format!("❌ Backup failed: {e}"); }
+                                }
+                            })
+                            .expect("failed to spawn backup thread");
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.overwrite_confirm = None;
+                        *self.status.lock().unwrap() = "❌ Cancelled.".into();
+                    }
+                });
+                ui.separator();
+            }
 
             if self.template_editor {
                 ui.label("Editing Template");
@@ -617,35 +665,58 @@ impl eframe::App for GUIApp {
                                         return;
                                     }
 
+                                    // Resolve output directory
+                                    let out_dir = if self.save_to_exe_dir {
+                                        std::env::current_exe().ok()
+                                            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+                                    } else {
+                                        FileDialog::new()
+                                            .set_title("Choose backup destination")
+                                            .pick_folder()
+                                    };
+
+                                    let Some(out_dir) = out_dir else {
+                                        *status.lock().unwrap() = "❌ Cancelled.".into();
+                                        return;
+                                    };
+
+                                    // Resolve filename
+                                    let filename = match &self.backup_name_mode {
+                                        BackupNameMode::Timestamp(fmt) => {
+                                            format!("backup_{}.tar", Local::now().format(fmt))
+                                        }
+                                        BackupNameMode::Fixed(name) => {
+                                            format!("{name}.tar")
+                                        }
+                                    };
+
+                                    // Check for overwrite if fixed name
+                                    let dest = out_dir.join(&filename);
+                                    if matches!(self.backup_name_mode, BackupNameMode::Fixed(_)) && dest.exists() {
+                                        self.overwrite_confirm = Some(dest);
+                                        return;
+                                    }
+
                                     *status.lock().unwrap() = "Packing into .tar".into();
 
                                     let progress = Progress::default();
                                     self.backup_progress = Some(progress.clone());
                                     let verbose = self.verbose_logging;
 
-                                    let out_dir = FileDialog::new()
-                                        .set_title("Choose backup destination")
-                                        .pick_folder();
-
-                                        std::thread::Builder::new()
+                                    std::thread::Builder::new()
                                         .name("konserve-backup".into())
-                                        .stack_size(8 * 1024 * 1024) // 8 MiB
-                                    .spawn(move || {
-                                            if let Some(out_dir) = out_dir {
-                                                match backup_gui(&folders, &out_dir, &progress, verbose) {
-                                                    Ok(path) => {
-                                                        *status.lock().unwrap() = format!("✅ Backup created:\n{}", path.display());
-                        }
-                        Err(e) => {
-                            *status.lock().unwrap() =
-                                format!("❌ Backup failed: {e}");
-                        }
-                    }
-                } else {
-                    *status.lock().unwrap() = "❌ Cancelled.".into();
-                }
-            })
-            .expect("failed to spawn backup thread");
+                                        .stack_size(8 * 1024 * 1024)
+                                        .spawn(move || {
+                                            match backup_gui(&folders, &out_dir, &filename, &progress, verbose) {
+                                                Ok(path) => {
+                                                    *status.lock().unwrap() = format!("✅ Backup created:\n{}", path.display());
+                                                }
+                                                Err(e) => {
+                                                    *status.lock().unwrap() = format!("❌ Backup failed: {e}");
+                                                }
+                                            }
+                                        })
+                                        .expect("failed to spawn backup thread");
     });
                             ui.add_sized(btn_size, egui::Button::new("Restore Backup"))
                                 .clicked()
@@ -832,36 +903,25 @@ impl eframe::App for GUIApp {
 
                     ui.separator();
 
-                    ui.label("Default backup location: (WIP)");
+                    ui.label("Default backup location:");
+                    ui.add_sized([390.0, 20.0], egui::TextEdit::singleline(&mut loc_str));
                     ui.horizontal(|ui| {
-                        ui.add_sized([240.0, 20.0], egui::TextEdit::singleline(&mut loc_str));
-
-                        use std::path::Path;
-                        if !loc_str.is_empty() {
-                            if Path::new(&loc_str).is_dir() {
-                                ui.label("✅").on_hover_text("This path exists");
-                            } else {
-                                ui.label("❌").on_hover_text("This path does not exist");
-                            }
-                        }
-
                         if ui.button("Browse").clicked() {
                             if let Some(folder) = rfd::FileDialog::new().pick_folder() {
                                 loc_str = folder.display().to_string();
                             }
                         }
-
                         if !loc_str.is_empty() && ui.button("Clear").clicked() {
                             loc_str.clear();
                         }
+                        if !loc_str.is_empty() {
+                            if Path::new(&loc_str).is_dir() {
+                                ui.label("✅").on_hover_text("Path exists");
+                            } else {
+                                ui.label("❌").on_hover_text("Path does not exist");
+                            }
+                        }
                     });
-
-                    // === Wiring Placeholder ===
-                    // When logic is implemented (in helpers.rs),
-                    // use self.default_backup_location in your backup functions.
-                    //
-                    // --- Save/Load Config ---
-                    // serialization/deserialization
 
                     // Apply changes to default backup location
                     let should_update = match &self.default_backup_location {
@@ -869,14 +929,84 @@ impl eframe::App for GUIApp {
                         None => !loc_str.is_empty(),
                     };
                     if should_update {
-                        if !loc_str.is_empty() {
-                            self.default_backup_location = Some(std::path::PathBuf::from(&loc_str));
-                            // TODO: Call a helper here to persist the setting, e.g.:
-                            // helpers::save_settings(self);
+                        self.default_backup_location = if loc_str.is_empty() {
+                            None
                         } else {
-                            self.default_backup_location = None;
-                            // TODO: Call a helper here to clear the saved location if needed.
+                            Some(std::path::PathBuf::from(&loc_str))
+                        };
+                    }
+
+                    ui.separator();
+
+                    ui.checkbox(&mut self.save_to_exe_dir, "Save backups to exe directory");
+
+                    ui.separator();
+
+                    const TS_PRESETS: &[(&str, &str)] = &[
+                        ("%Y-%m-%d_%H-%M-%S", "YYYY-MM-DD_HH-MM-SS"),
+                        ("%Y-%m-%d_%H-%M",    "YYYY-MM-DD_HH-MM"),
+                        ("%Y-%m-%d",          "YYYY-MM-DD"),
+                        ("%d-%m-%Y_%H-%M-%S", "DD-MM-YYYY_HH-MM-SS"),
+                        ("%d-%m-%Y_%H-%M",    "DD-MM-YYYY_HH-MM"),
+                        ("%d-%m-%Y",          "DD-MM-YYYY"),
+                        ("%m-%d-%Y_%H-%M-%S", "MM-DD-YYYY_HH-MM-SS"),
+                        ("%m-%d-%Y_%H-%M",    "MM-DD-YYYY_HH-MM"),
+                        ("%m-%d-%Y",          "MM-DD-YYYY"),
+                        ("%y-%m-%d_%H-%M-%S", "YY-MM-DD_HH-MM-SS"),
+                        ("%y-%m-%d_%H-%M",    "YY-MM-DD_HH-MM"),
+                        ("%y-%m-%d",          "YY-MM-DD"),
+                        ("%d-%m-%y_%H-%M-%S", "DD-MM-YY_HH-MM-SS"),
+                        ("%d-%m-%y_%H-%M",    "DD-MM-YY_HH-MM"),
+                        ("%d-%m-%y",          "DD-MM-YY"),
+                        ("%m-%d-%y_%H-%M-%S", "MM-DD-YY_HH-MM-SS"),
+                        ("%m-%d-%y_%H-%M",    "MM-DD-YY_HH-MM"),
+                        ("%m-%d-%y",          "MM-DD-YY"),
+                    ];
+
+                    ui.label("Backup filename:");
+                    let is_fixed = matches!(self.backup_name_mode, BackupNameMode::Fixed(_));
+                    ui.horizontal(|ui| {
+                        if ui.radio(!is_fixed, "Timestamp").clicked() {
+                            let fmt = TS_PRESETS[0].0.to_string();
+                            self.backup_name_mode = BackupNameMode::Timestamp(fmt);
                         }
+                        if ui.radio(is_fixed, "Fixed name").clicked() {
+                            self.backup_name_mode = BackupNameMode::Fixed(self.backup_name_input.clone());
+                        }
+                    });
+
+                    if is_fixed {
+                        ui.horizontal(|ui| {
+                            ui.add(egui::TextEdit::singleline(&mut self.backup_name_input).desired_width(180.0));
+                            ui.label(format!("→ {}.tar", self.backup_name_input));
+                        });
+                        self.backup_name_mode = BackupNameMode::Fixed(self.backup_name_input.clone());
+                    } else {
+                        let current_fmt = match &self.backup_name_mode {
+                            BackupNameMode::Timestamp(f) => f.clone(),
+                            _ => TS_PRESETS[0].0.to_string(),
+                        };
+                        let selected_label = TS_PRESETS
+                            .iter()
+                            .find(|(f, _)| *f == current_fmt)
+                            .map(|(_, l)| *l)
+                            .unwrap_or(TS_PRESETS[0].1);
+                        egui::ComboBox::from_id_salt("ts_format")
+                            .selected_text(selected_label)
+                            .width(180.0)
+                            .show_ui(ui, |ui| {
+                                for (fmt, label) in TS_PRESETS {
+                                    let preview = Local::now().format(fmt).to_string();
+                                    let display = format!("{label}  ({preview})");
+                                    ui.selectable_value(
+                                        &mut self.backup_name_mode,
+                                        BackupNameMode::Timestamp(fmt.to_string()),
+                                        display,
+                                    );
+                                }
+                            });
+                        let preview = Local::now().format(&current_fmt).to_string();
+                        ui.label(format!("→ backup_{preview}.tar"));
                     }
 
                     ui.separator();
@@ -888,6 +1018,8 @@ impl eframe::App for GUIApp {
                         self.config.default_backup_location = self.default_backup_location.clone();
                         self.config.automatic_updates = self.automatic_updates;
                         self.config.file_size_summary = self.file_size_summary;
+                        self.config.save_to_exe_dir = self.save_to_exe_dir;
+                        self.config.backup_name_mode = self.backup_name_mode.clone();
 
                         self.config.save();
                         *self.status.lock().unwrap() = "Settings saved".into();

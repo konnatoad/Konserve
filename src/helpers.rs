@@ -109,6 +109,12 @@ pub struct KonserveConfig {
     /// Show a summary of file sizes during backup/restore.
     #[serde(default)]
     pub file_size_summary: bool,
+    /// Save backups to the directory containing the exe instead of prompting.
+    #[serde(default)]
+    pub save_to_exe_dir: bool,
+    /// Controls how the backup filename is generated.
+    #[serde(default)]
+    pub backup_name_mode: BackupNameMode,
 }
 
 /// Provides default values for [`KonserveConfig`].
@@ -133,6 +139,8 @@ impl Default for KonserveConfig {
             default_backup_location: None,
             automatic_updates: false,
             file_size_summary: false,
+            save_to_exe_dir: false,
+            backup_name_mode: BackupNameMode::default(),
         }
     }
 }
@@ -210,6 +218,21 @@ impl KonserveConfig {
                 eprintln!("[ERROR] Failed to serialize config: {e}");
             }
         }
+    }
+}
+
+/// Controls how the backup output filename is generated.
+#[derive(Serialize, Deserialize, PartialEq, Eq, Clone)]
+pub enum BackupNameMode {
+    /// Use a strftime-style format string (e.g. `%Y-%m-%d_%H-%M-%S`).
+    Timestamp(String),
+    /// Use a fixed plain string as the filename (no timestamp).
+    Fixed(String),
+}
+
+impl Default for BackupNameMode {
+    fn default() -> Self {
+        BackupNameMode::Timestamp("%Y-%m-%d_%H-%M-%S".into())
     }
 }
 
