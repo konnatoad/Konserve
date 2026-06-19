@@ -254,20 +254,22 @@ impl eframe::App for GUIApp {
     /// - `ctx`: egui context used to render the UI.
     /// - `_frame`: Frame handle (unused here).
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+            ui.add_space(4.0);
             ui.horizontal(|ui| {
-                if ui
-                    .selectable_label(self.tab == MainTab::Home, "Home")
-                    .clicked()
-                {
-                    self.tab = MainTab::Home;
-                }
-                if ui
-                    .selectable_label(self.tab == MainTab::Settings, "Settings")
-                    .clicked()
-                {
-                    self.tab = MainTab::Settings;
+                ui.add_space(4.0);
+                for (label, tab) in [("Home", MainTab::Home), ("Settings", MainTab::Settings)] {
+                    let active = self.tab == tab;
+                    let text = if active {
+                        egui::RichText::new(label).strong()
+                    } else {
+                        egui::RichText::new(label)
+                    };
+                    if ui.selectable_label(active, text).clicked() {
+                        self.tab = tab;
+                    }
                 }
             });
+            ui.add_space(2.0);
 
             // Overwrite confirmation dialog for fixed backup names
             if let Some(ref dest) = self.overwrite_confirm.clone() {
@@ -484,11 +486,23 @@ impl eframe::App for GUIApp {
                         }
                     }
 
-                    ui.heading("Konserve");
+                    ui.horizontal(|ui| {
+                        ui.heading("Konserve");
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.weak(format!("v{}", env!("CARGO_PKG_VERSION")));
+                        });
+                    });
                     ui.separator();
+                    ui.add_space(2.0);
 
                     // Folder and File Pickers
-                    ui.horizontal(|ui| {
+                    egui::Frame::new()
+                        .fill(ui.visuals().faint_bg_color)
+                        .corner_radius(6.0)
+                        .inner_margin(egui::Margin::symmetric(6, 4))
+                        .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
                         if ui.button("Add Folders").clicked() {
                             #[cfg(target_os = "macos")]
                             {
@@ -544,7 +558,9 @@ impl eframe::App for GUIApp {
                                 }
                             }
                         }
-                    });
+                        });
+                    }); // end picker frame
+                    ui.add_space(2.0);
 
                     if self.file_dialog_opening {
                         ui.horizontal(|ui| {
@@ -554,38 +570,61 @@ impl eframe::App for GUIApp {
                         ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
                     }
 
-                    // Show selected paths
-                    if !self.selected_folders.is_empty() {
-                        ui.add_space(4.0);
-
-                        let mut to_remove = None;
-                        egui::ScrollArea::vertical()
-                            .max_height(240.0)
-                            .show(ui, |ui| {
-                                ui.set_width(ui.available_width());
-                                for (i, path) in self.selected_folders.iter().enumerate() {
-                                    if ui.button(path.display().to_string()).clicked() {
-                                        to_remove = Some(i);
-                                    }
+                    // Selected paths card
+                    let stroke = ui.visuals().widgets.noninteractive.bg_stroke;
+                    egui::Frame::new()
+                        .stroke(stroke)
+                        .corner_radius(6.0)
+                        .inner_margin(egui::Margin::symmetric(6, 4))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            if self.selected_folders.is_empty() {
+                                ui.vertical_centered(|ui| {
+                                    ui.add_space(18.0);
+                                    ui.weak("No files or folders selected.");
+                                    ui.weak("Use Add Folders or Add Files above.");
+                                    ui.add_space(18.0);
+                                });
+                            } else {
+                                ui.horizontal(|ui| {
+                                    ui.weak(format!("Selected ({})", self.selected_folders.len()));
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        if ui.small_button("Clear All").clicked() {
+                                            self.selected_folders.clear();
+                                        }
+                                    });
+                                });
+                                ui.separator();
+                                let mut to_remove = None;
+                                egui::ScrollArea::vertical()
+                                    .max_height(200.0)
+                                    .show(ui, |ui| {
+                                        ui.set_width(ui.available_width());
+                                        for (i, path) in self.selected_folders.iter().enumerate() {
+                                            ui.horizontal(|ui| {
+                                                ui.weak("•");
+                                                if ui.selectable_label(false, path.display().to_string())
+                                                    .on_hover_text("Click to remove")
+                                                    .clicked()
+                                                {
+                                                    to_remove = Some(i);
+                                                }
+                                            });
+                                        }
+                                    });
+                                if let Some(i) = to_remove {
+                                    self.selected_folders.remove(i);
                                 }
-                            });
-                        if let Some(i) = to_remove {
-                            self.selected_folders.remove(i);
-                        }
-
-                        ui.add_space(4.0);
-
-                        if ui.button("Clear All").clicked() {
-                            self.selected_folders.clear();
-                        }
-                    }
+                            }
+                        });
+                    ui.add_space(2.0);
 
                     ui.separator();
 
                     // Template and Action Buttons
                     ui.horizontal(|ui| {
                         ui.vertical(|ui| {
-                            let btn_size = egui::vec2(95.0, 17.0);
+                            let btn_size = egui::vec2(110.0, 24.0);
                             ui.add_sized(btn_size, egui::Button::new("Load Template"))
                                 .clicked()
                                 .then(|| {
@@ -652,8 +691,9 @@ impl eframe::App for GUIApp {
                                 });
                         });
                         ui.vertical(|ui| {
-                            let btn_size = egui::vec2(100.0, 17.0);
-                            ui.add_sized(btn_size, egui::Button::new("Create Backup"))
+                            let btn_size = egui::vec2(115.0, 24.0);
+                            ui.add_sized(btn_size, egui::Button::new("Create Backup")
+                                .fill(egui::Color32::from_rgb(40, 100, 180)))
                                 .clicked()
                                 .then(|| {
                                     // Check if any folders are selected
@@ -792,13 +832,24 @@ impl eframe::App for GUIApp {
                             }
                         }
                     }
-                 ui.separator();
-
-                ui.label(format!("Status: {}", self.status.lock().unwrap()));
+                    ui.add_space(2.0);
+                    egui::Frame::new()
+                        .fill(ui.visuals().extreme_bg_color)
+                        .corner_radius(4.0)
+                        .inner_margin(egui::Margin::symmetric(8, 4))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.label(self.status.lock().unwrap().as_str());
+                        });
                 }
 
                 MainTab::Settings => {
-                    ui.heading("Settings");
+                    ui.horizontal(|ui| {
+                        ui.heading("Settings");
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.weak(format!("v{}", env!("CARGO_PKG_VERSION")));
+                        });
+                    });
                     ui.separator();
 
                     let btn_size = egui::vec2(95.0, 17.0);
@@ -826,7 +877,12 @@ impl eframe::App for GUIApp {
                             }
                         });
 
-                    ui.separator();
+                    ui.add_space(4.0);
+
+                    let frame = egui::Frame::new()
+                        .fill(ui.visuals().faint_bg_color)
+                        .corner_radius(6.0)
+                        .inner_margin(egui::Margin::symmetric(8, 6));
 
                     let mut loc_str = self
                         .default_backup_location
@@ -834,92 +890,151 @@ impl eframe::App for GUIApp {
                         .map(|p| p.display().to_string())
                         .unwrap_or_default();
 
-                    ui.checkbox(
-                        &mut self.conflict_resolution_enabled,
-                        "Enable Conflict Resolution Mode (WIP)",
-                    );
-
-                    if self.conflict_resolution_enabled {
-                        egui::ComboBox::from_label("Conflict resolution mode (WIP)")
-                            .selected_text(match self.conflict_resolution_mode {
-                                ConflictResolutionMode::Prompt => "Prompt",
-                                ConflictResolutionMode::Overwrite => "Overwrite",
-                                ConflictResolutionMode::Skip => "Skip",
-                                ConflictResolutionMode::Rename => "Rename",
-                            })
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(
-                                    &mut self.conflict_resolution_mode,
-                                    ConflictResolutionMode::Prompt,
-                                    "Prompt",
-                                );
-                                ui.selectable_value(
-                                    &mut self.conflict_resolution_mode,
-                                    ConflictResolutionMode::Overwrite,
-                                    "Overwrite",
-                                );
-                                ui.selectable_value(
-                                    &mut self.conflict_resolution_mode,
-                                    ConflictResolutionMode::Skip,
-                                    "Skip",
-                                );
-                                ui.selectable_value(
-                                    &mut self.conflict_resolution_mode,
-                                    ConflictResolutionMode::Rename,
-                                    "Rename",
-                                );
-                            });
-                    }
-
-                    ui.horizontal(|ui| {
-                        let resp = ui.checkbox(&mut self.verbose_logging, "Enable Verbose Logging");
-                        if resp.changed() {
+                    // --- General ---
+                    frame.show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.label(egui::RichText::new("General").weak().small());
+                        ui.add_space(2.0);
+                        ui.horizontal(|ui| {
+                            let resp = ui.checkbox(&mut self.verbose_logging, "Verbose Logging");
+                            if resp.changed() {
+                                if self.verbose_logging { helpers::init_verbose_log(); }
+                                else { helpers::close_verbose_log(); }
+                            }
                             if self.verbose_logging {
-                                helpers::init_verbose_log();
-                            } else {
-                                helpers::close_verbose_log();
+                                if ui.small_button("Open Log").clicked() {
+                                    let path = verbose_log_path();
+                                    #[cfg(target_os = "windows")]
+                                    let _ = std::process::Command::new("explorer").arg(&path).spawn();
+                                    #[cfg(not(target_os = "windows"))]
+                                    let _ = std::process::Command::new("open").arg(&path).spawn();
+                                }
                             }
-                        }
-                        if self.verbose_logging {
-                            if ui.small_button("Open Log").clicked() {
-                                let path = verbose_log_path();
-                                #[cfg(target_os = "windows")]
-                                let _ = std::process::Command::new("explorer").arg(&path).spawn();
-                                #[cfg(not(target_os = "windows"))]
-                                let _ = std::process::Command::new("open").arg(&path).spawn();
-                            }
+                        });
+                        ui.checkbox(&mut self.automatic_updates, "Check for Updates on Startup (WIP)");
+                        ui.checkbox(&mut self.file_size_summary, "File Size Summary (WIP)");
+                    });
+
+                    ui.add_space(4.0);
+
+                    // --- Conflict Resolution ---
+                    frame.show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.label(egui::RichText::new("Conflict Resolution").weak().small());
+                        ui.add_space(2.0);
+                        ui.checkbox(&mut self.conflict_resolution_enabled, "Enable Conflict Resolution (WIP)");
+                        if self.conflict_resolution_enabled {
+                            egui::ComboBox::from_id_salt("conflict_mode")
+                                .selected_text(match self.conflict_resolution_mode {
+                                    ConflictResolutionMode::Prompt => "Prompt",
+                                    ConflictResolutionMode::Overwrite => "Overwrite",
+                                    ConflictResolutionMode::Skip => "Skip",
+                                    ConflictResolutionMode::Rename => "Rename",
+                                })
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(&mut self.conflict_resolution_mode, ConflictResolutionMode::Prompt, "Prompt");
+                                    ui.selectable_value(&mut self.conflict_resolution_mode, ConflictResolutionMode::Overwrite, "Overwrite");
+                                    ui.selectable_value(&mut self.conflict_resolution_mode, ConflictResolutionMode::Skip, "Skip");
+                                    ui.selectable_value(&mut self.conflict_resolution_mode, ConflictResolutionMode::Rename, "Rename");
+                                });
                         }
                     });
 
-                    ui.checkbox(
-                        &mut self.automatic_updates,
-                        "Enable Updates on Startup (WIP)",
-                    );
+                    ui.add_space(4.0);
 
-                    ui.checkbox(
-                        &mut self.file_size_summary,
-                        "Enable File Size Summary (WIP)",
-                    );
+                    // --- Backup Location & Naming ---
+                    frame.show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.label(egui::RichText::new("Backup Location & Naming").weak().small());
+                        ui.add_space(2.0);
 
-                    ui.separator();
+                        ui.checkbox(&mut self.save_to_exe_dir, "Save backups to exe directory");
+                        ui.add_space(2.0);
 
-                    ui.label("Default backup location:");
-                    ui.add_sized([390.0, 20.0], egui::TextEdit::singleline(&mut loc_str));
-                    ui.horizontal(|ui| {
-                        if ui.button("Browse").clicked() {
-                            if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                                loc_str = folder.display().to_string();
+                        ui.label("Default backup location:");
+                        ui.add_sized([ui.available_width(), 20.0], egui::TextEdit::singleline(&mut loc_str));
+                        ui.horizontal(|ui| {
+                            if ui.small_button("Browse").clicked() {
+                                if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                                    loc_str = folder.display().to_string();
+                                }
                             }
-                        }
-                        if !loc_str.is_empty() && ui.button("Clear").clicked() {
-                            loc_str.clear();
-                        }
-                        if !loc_str.is_empty() {
-                            if Path::new(&loc_str).is_dir() {
-                                ui.label("✅").on_hover_text("Path exists");
-                            } else {
-                                ui.label("❌").on_hover_text("Path does not exist");
+                            if !loc_str.is_empty() && ui.small_button("Clear").clicked() {
+                                loc_str.clear();
                             }
+                            if !loc_str.is_empty() {
+                                if Path::new(&loc_str).is_dir() {
+                                    ui.label("✅").on_hover_text("Path exists");
+                                } else {
+                                    ui.label("❌").on_hover_text("Path does not exist");
+                                }
+                            }
+                        });
+
+                        ui.add_space(4.0);
+
+                        const TS_PRESETS: &[(&str, &str)] = &[
+                            ("%Y-%m-%d_%H-%M-%S", "YYYY-MM-DD_HH-MM-SS"),
+                            ("%Y-%m-%d_%H-%M",    "YYYY-MM-DD_HH-MM"),
+                            ("%Y-%m-%d",          "YYYY-MM-DD"),
+                            ("%d-%m-%Y_%H-%M-%S", "DD-MM-YYYY_HH-MM-SS"),
+                            ("%d-%m-%Y_%H-%M",    "DD-MM-YYYY_HH-MM"),
+                            ("%d-%m-%Y",          "DD-MM-YYYY"),
+                            ("%m-%d-%Y_%H-%M-%S", "MM-DD-YYYY_HH-MM-SS"),
+                            ("%m-%d-%Y_%H-%M",    "MM-DD-YYYY_HH-MM"),
+                            ("%m-%d-%Y",          "MM-DD-YYYY"),
+                            ("%y-%m-%d_%H-%M-%S", "YY-MM-DD_HH-MM-SS"),
+                            ("%y-%m-%d_%H-%M",    "YY-MM-DD_HH-MM"),
+                            ("%y-%m-%d",          "YY-MM-DD"),
+                            ("%d-%m-%y_%H-%M-%S", "DD-MM-YY_HH-MM-SS"),
+                            ("%d-%m-%y_%H-%M",    "DD-MM-YY_HH-MM"),
+                            ("%d-%m-%y",          "DD-MM-YY"),
+                            ("%m-%d-%y_%H-%M-%S", "MM-DD-YY_HH-MM-SS"),
+                            ("%m-%d-%y_%H-%M",    "MM-DD-YY_HH-MM"),
+                            ("%m-%d-%y",          "MM-DD-YY"),
+                        ];
+
+                        ui.label("Backup filename:");
+                        let is_fixed = matches!(self.backup_name_mode, BackupNameMode::Fixed(_));
+                        ui.horizontal(|ui| {
+                            if ui.radio(!is_fixed, "Timestamp").clicked() {
+                                self.backup_name_mode = BackupNameMode::Timestamp(TS_PRESETS[0].0.to_string());
+                            }
+                            if ui.radio(is_fixed, "Fixed name").clicked() {
+                                self.backup_name_mode = BackupNameMode::Fixed(self.backup_name_input.clone());
+                            }
+                        });
+
+                        if is_fixed {
+                            ui.horizontal(|ui| {
+                                ui.add(egui::TextEdit::singleline(&mut self.backup_name_input).desired_width(160.0));
+                                ui.weak(format!("→ {}.tar", self.backup_name_input));
+                            });
+                            self.backup_name_mode = BackupNameMode::Fixed(self.backup_name_input.clone());
+                        } else {
+                            let current_fmt = match &self.backup_name_mode {
+                                BackupNameMode::Timestamp(f) => f.clone(),
+                                _ => TS_PRESETS[0].0.to_string(),
+                            };
+                            let selected_label = TS_PRESETS.iter()
+                                .find(|(f, _)| *f == current_fmt)
+                                .map(|(_, l)| *l)
+                                .unwrap_or(TS_PRESETS[0].1);
+                            egui::ComboBox::from_id_salt("ts_format")
+                                .selected_text(selected_label)
+                                .width(180.0)
+                                .show_ui(ui, |ui| {
+                                    for (fmt, label) in TS_PRESETS {
+                                        let preview = Local::now().format(fmt).to_string();
+                                        ui.selectable_value(
+                                            &mut self.backup_name_mode,
+                                            BackupNameMode::Timestamp(fmt.to_string()),
+                                            format!("{label}  ({preview})"),
+                                        );
+                                    }
+                                });
+                            let preview = Local::now().format(&current_fmt).to_string();
+                            ui.weak(format!("→ backup_{preview}.tar"));
                         }
                     });
 
@@ -936,95 +1051,26 @@ impl eframe::App for GUIApp {
                         };
                     }
 
-                    ui.separator();
+                    ui.add_space(4.0);
 
-                    ui.checkbox(&mut self.save_to_exe_dir, "Save backups to exe directory");
-
-                    ui.separator();
-
-                    const TS_PRESETS: &[(&str, &str)] = &[
-                        ("%Y-%m-%d_%H-%M-%S", "YYYY-MM-DD_HH-MM-SS"),
-                        ("%Y-%m-%d_%H-%M",    "YYYY-MM-DD_HH-MM"),
-                        ("%Y-%m-%d",          "YYYY-MM-DD"),
-                        ("%d-%m-%Y_%H-%M-%S", "DD-MM-YYYY_HH-MM-SS"),
-                        ("%d-%m-%Y_%H-%M",    "DD-MM-YYYY_HH-MM"),
-                        ("%d-%m-%Y",          "DD-MM-YYYY"),
-                        ("%m-%d-%Y_%H-%M-%S", "MM-DD-YYYY_HH-MM-SS"),
-                        ("%m-%d-%Y_%H-%M",    "MM-DD-YYYY_HH-MM"),
-                        ("%m-%d-%Y",          "MM-DD-YYYY"),
-                        ("%y-%m-%d_%H-%M-%S", "YY-MM-DD_HH-MM-SS"),
-                        ("%y-%m-%d_%H-%M",    "YY-MM-DD_HH-MM"),
-                        ("%y-%m-%d",          "YY-MM-DD"),
-                        ("%d-%m-%y_%H-%M-%S", "DD-MM-YY_HH-MM-SS"),
-                        ("%d-%m-%y_%H-%M",    "DD-MM-YY_HH-MM"),
-                        ("%d-%m-%y",          "DD-MM-YY"),
-                        ("%m-%d-%y_%H-%M-%S", "MM-DD-YY_HH-MM-SS"),
-                        ("%m-%d-%y_%H-%M",    "MM-DD-YY_HH-MM"),
-                        ("%m-%d-%y",          "MM-DD-YY"),
-                    ];
-
-                    ui.label("Backup filename:");
-                    let is_fixed = matches!(self.backup_name_mode, BackupNameMode::Fixed(_));
-                    ui.horizontal(|ui| {
-                        if ui.radio(!is_fixed, "Timestamp").clicked() {
-                            let fmt = TS_PRESETS[0].0.to_string();
-                            self.backup_name_mode = BackupNameMode::Timestamp(fmt);
-                        }
-                        if ui.radio(is_fixed, "Fixed name").clicked() {
-                            self.backup_name_mode = BackupNameMode::Fixed(self.backup_name_input.clone());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                        if ui.add(egui::Button::new("  Save  ")
+                            .fill(egui::Color32::from_rgb(40, 100, 180)))
+                            .clicked()
+                        {
+                            self.config.verbose_logging = self.verbose_logging;
+                            self.config.conflict_resolution_enabled = self.conflict_resolution_enabled;
+                            self.config.conflict_resolution_mode = self.conflict_resolution_mode;
+                            self.config.default_backup_location = self.default_backup_location.clone();
+                            self.config.automatic_updates = self.automatic_updates;
+                            self.config.file_size_summary = self.file_size_summary;
+                            self.config.save_to_exe_dir = self.save_to_exe_dir;
+                            self.config.backup_name_mode = self.backup_name_mode.clone();
+                            self.config.save();
+                            *self.status.lock().unwrap() = "✅ Settings saved".into();
+                            ui.ctx().request_repaint();
                         }
                     });
-
-                    if is_fixed {
-                        ui.horizontal(|ui| {
-                            ui.add(egui::TextEdit::singleline(&mut self.backup_name_input).desired_width(180.0));
-                            ui.label(format!("→ {}.tar", self.backup_name_input));
-                        });
-                        self.backup_name_mode = BackupNameMode::Fixed(self.backup_name_input.clone());
-                    } else {
-                        let current_fmt = match &self.backup_name_mode {
-                            BackupNameMode::Timestamp(f) => f.clone(),
-                            _ => TS_PRESETS[0].0.to_string(),
-                        };
-                        let selected_label = TS_PRESETS
-                            .iter()
-                            .find(|(f, _)| *f == current_fmt)
-                            .map(|(_, l)| *l)
-                            .unwrap_or(TS_PRESETS[0].1);
-                        egui::ComboBox::from_id_salt("ts_format")
-                            .selected_text(selected_label)
-                            .width(180.0)
-                            .show_ui(ui, |ui| {
-                                for (fmt, label) in TS_PRESETS {
-                                    let preview = Local::now().format(fmt).to_string();
-                                    let display = format!("{label}  ({preview})");
-                                    ui.selectable_value(
-                                        &mut self.backup_name_mode,
-                                        BackupNameMode::Timestamp(fmt.to_string()),
-                                        display,
-                                    );
-                                }
-                            });
-                        let preview = Local::now().format(&current_fmt).to_string();
-                        ui.label(format!("→ backup_{preview}.tar"));
-                    }
-
-                    ui.separator();
-
-                    if ui.button("Save").clicked() {
-                        self.config.verbose_logging = self.verbose_logging;
-                        self.config.conflict_resolution_enabled = self.conflict_resolution_enabled;
-                        self.config.conflict_resolution_mode = self.conflict_resolution_mode;
-                        self.config.default_backup_location = self.default_backup_location.clone();
-                        self.config.automatic_updates = self.automatic_updates;
-                        self.config.file_size_summary = self.file_size_summary;
-                        self.config.save_to_exe_dir = self.save_to_exe_dir;
-                        self.config.backup_name_mode = self.backup_name_mode.clone();
-
-                        self.config.save();
-                        *self.status.lock().unwrap() = "Settings saved".into();
-                        ui.ctx().request_repaint();
-                    }
 
                 }
             }
