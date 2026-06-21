@@ -147,6 +147,7 @@ pub fn restore_backup(
                         .map(|x| x.to_string_lossy().into_owned())
                         .unwrap_or_default();
                     to_extract.contains(&p)
+                        || to_extract.iter().any(|s| p.starts_with(&format!("{s}/")))
                 } else {
                     true
                 }
@@ -175,8 +176,12 @@ pub fn restore_backup(
             continue;
         }
 
-        // If selection is archive, skip any non-matching path
-        if selected.is_some() && !to_extract.contains(&path_in_tar) {
+        // If selection is active, skip entries that don't match exactly or aren't
+        // inside a selected top-level folder (uuid/ prefix).
+        if selected.is_some()
+            && !to_extract.contains(&path_in_tar)
+            && !to_extract.iter().any(|s| path_in_tar.starts_with(&format!("{s}/")))
+        {
             if verbose { dlog!("[skip]    {path_in_tar}  (not selected)"); }
             continue;
         }
