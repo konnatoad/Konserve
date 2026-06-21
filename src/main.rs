@@ -339,10 +339,10 @@ impl eframe::App for GUIApp {
                                 }
 
                                 // Browse for folder
-                                if ui.button("Browse").clicked() {
-                                    if let Some(p) = FileDialog::new().pick_folder() {
-                                        *path = p;
-                                    }
+                                if ui.button("Browse").clicked()
+                                    && let Some(p) = FileDialog::new().pick_folder()
+                                {
+                                    *path = p;
                                 }
 
                                 // Remove path
@@ -359,24 +359,23 @@ impl eframe::App for GUIApp {
                 if ui.button("Add Path").clicked() {
                     self.template_paths.push(PathBuf::new());
                 }
-                if ui.button("Save Template").clicked() {
-                    if let Some(path) = FileDialog::new().add_filter("JSON", &["json"]).save_file()
-                    {
-                        let tpl = BackupTemplate {
-                            paths: self.template_paths.clone(),
-                        };
-                        match serde_json::to_string_pretty(&tpl) {
-                            Ok(json) => {
-                                if fs::write(&path, json).is_ok() {
-                                    *self.status.lock().unwrap() = "✅ Template saved".into();
-                                    self.template_editor = false;
-                                } else {
-                                    *self.status.lock().unwrap() = "❌ Couldn't write file.".into();
-                                }
+                if ui.button("Save Template").clicked()
+                    && let Some(path) = FileDialog::new().add_filter("JSON", &["json"]).save_file()
+                {
+                    let tpl = BackupTemplate {
+                        paths: self.template_paths.clone(),
+                    };
+                    match serde_json::to_string_pretty(&tpl) {
+                        Ok(json) => {
+                            if fs::write(&path, json).is_ok() {
+                                *self.status.lock().unwrap() = "✅ Template saved".into();
+                                self.template_editor = false;
+                            } else {
+                                *self.status.lock().unwrap() = "❌ Couldn't write file.".into();
                             }
-                            Err(_) => {
-                                *self.status.lock().unwrap() = "❌ Failed to serialize.".into();
-                            }
+                        }
+                        Err(_) => {
+                            *self.status.lock().unwrap() = "❌ Failed to serialize.".into();
                         }
                     }
                 }
@@ -403,29 +402,27 @@ impl eframe::App for GUIApp {
 
                 ui.separator();
 
-                if ui.button("Restore selected").clicked() {
-                    if let Some(zip_path) = &self.restore_zip_path.clone() {
-                        // Collect selected paths from the restore tree
-                        let selected = collect_paths(&self.restore_tree, self.verbose_logging);
-                        let zip_path = zip_path.clone();
-                        let status = self.status.clone();
+                if ui.button("Restore selected").clicked()
+                    && let Some(zip_path) = &self.restore_zip_path.clone()
+                {
+                    let selected = collect_paths(&self.restore_tree, self.verbose_logging);
+                    let zip_path = zip_path.clone();
+                    let status = self.status.clone();
 
-                        let progress = Progress::default();
-                        self.restore_progress = Some(progress.clone());
-                        self.restore_opening = false;
-                        let verbose = self.verbose_logging;
+                    let progress = Progress::default();
+                    self.restore_progress = Some(progress.clone());
+                    self.restore_opening = false;
+                    let verbose = self.verbose_logging;
 
-                        thread::spawn(move || {
-                            // Show spinner right away
-                            if let Err(e) =
-                                restore_backup(&zip_path, Some(selected), status.clone(), &progress, verbose)
-                            {
-                                *status.lock().unwrap() = format!("❌ Restore failed: {e}");
-                            }
-                        });
+                    thread::spawn(move || {
+                        if let Err(e) =
+                            restore_backup(&zip_path, Some(selected), status.clone(), &progress, verbose)
+                        {
+                            *status.lock().unwrap() = format!("❌ Restore failed: {e}");
+                        }
+                    });
 
-                        self.restore_editor = false;
-                    }
+                    self.restore_editor = false;
                 }
 
                 if ui.button("Cancel").clicked() {
@@ -630,8 +627,7 @@ impl eframe::App for GUIApp {
                                 .then(|| {
                                     if let Some(path) =
                                         FileDialog::new().add_filter("JSON", &["json"]).pick_file()
-                                    {
-                                        if let Ok(data) = fs::read_to_string(&path) {
+                                        && let Ok(data) = fs::read_to_string(&path) {
                                             if let Ok(template) =
                                                 serde_json::from_str::<BackupTemplate>(&data)
                                             {
@@ -665,7 +661,6 @@ impl eframe::App for GUIApp {
                                                     "❌ Bad template format.".into();
                                             }
                                         }
-                                    }
                                 });
 
                             ui.add_sized(btn_size, egui::Button::new("Save Template"))
@@ -858,8 +853,7 @@ impl eframe::App for GUIApp {
                         .then(|| {
                             if let Some(path) =
                                 FileDialog::new().add_filter("JSON", &["json"]).pick_file()
-                            {
-                                if let Ok(data) = fs::read_to_string(&path) {
+                                && let Ok(data) = fs::read_to_string(&path) {
                                     if let Ok(template) =
                                         serde_json::from_str::<BackupTemplate>(&data)
                                     {
@@ -874,7 +868,6 @@ impl eframe::App for GUIApp {
                                             "❌ Couldn't parse template.".into();
                                     }
                                 }
-                            }
                         });
 
                     ui.add_space(4.0);
@@ -901,14 +894,12 @@ impl eframe::App for GUIApp {
                                 if self.verbose_logging { helpers::init_verbose_log(); }
                                 else { helpers::close_verbose_log(); }
                             }
-                            if self.verbose_logging {
-                                if ui.small_button("Open Log").clicked() {
-                                    let path = verbose_log_path();
-                                    #[cfg(target_os = "windows")]
-                                    let _ = std::process::Command::new("explorer").arg(&path).spawn();
-                                    #[cfg(not(target_os = "windows"))]
-                                    let _ = std::process::Command::new("open").arg(&path).spawn();
-                                }
+                            if self.verbose_logging && ui.small_button("Open Log").clicked() {
+                                let path = verbose_log_path();
+                                #[cfg(target_os = "windows")]
+                                let _ = std::process::Command::new("explorer").arg(&path).spawn();
+                                #[cfg(not(target_os = "windows"))]
+                                let _ = std::process::Command::new("open").arg(&path).spawn();
                             }
                         });
                         ui.checkbox(&mut self.automatic_updates, "Check for Updates on Startup (WIP)");
@@ -954,10 +945,10 @@ impl eframe::App for GUIApp {
                         ui.label("Default backup location:");
                         ui.add_sized([ui.available_width(), 20.0], egui::TextEdit::singleline(&mut loc_str));
                         ui.horizontal(|ui| {
-                            if ui.small_button("Browse").clicked() {
-                                if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                                    loc_str = folder.display().to_string();
-                                }
+                            if ui.small_button("Browse").clicked()
+                                && let Some(folder) = rfd::FileDialog::new().pick_folder()
+                            {
+                                loc_str = folder.display().to_string();
                             }
                             if !loc_str.is_empty() && ui.small_button("Clear").clicked() {
                                 loc_str.clear();

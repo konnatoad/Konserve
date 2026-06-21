@@ -21,22 +21,10 @@ use std::{
 };
 
 use chrono::Local;
-use serde::{Deserialize, Serialize};
 use tar::{Builder, Header};
 use uuid::Uuid;
 use walkdir::WalkDir;
 
-/// A reusable backup template for saving and loading user selected paths
-///
-/// Templates allow users to predefine which files or folders
-/// should be backed up, so they don't have to select them manually every time.
-///
-/// Saved as JSON using [`serde`].
-#[derive(Serialize, Deserialize)]
-struct BackupTemplate {
-    /// List of filesystem paths included in the template.
-    paths: Vec<PathBuf>,
-}
 
 /// Create a `.tar` backup archive of the given folders or files.
 ///

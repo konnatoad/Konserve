@@ -45,10 +45,10 @@ pub fn init_verbose_log() {
     if let Some(dir) = path.parent() {
         let _ = fs::create_dir_all(dir);
     }
-    if let Ok(f) = OpenOptions::new().create(true).truncate(true).write(true).open(&path) {
-        if let Ok(mut guard) = DEBUG_LOG.lock() {
-            *guard = Some(f);
-        }
+    if let Ok(f) = OpenOptions::new().create(true).truncate(true).write(true).open(&path)
+        && let Ok(mut guard) = DEBUG_LOG.lock()
+    {
+        *guard = Some(f);
     }
 }
 
@@ -64,11 +64,11 @@ pub fn close_verbose_log() {
 /// Write a debug message to stdout (if available) and with a timestamp to the log file.
 pub fn write_dlog(msg: &str) {
     println!("{msg}");
-    if let Ok(mut guard) = DEBUG_LOG.lock() {
-        if let Some(ref mut f) = *guard {
-            let ts = Local::now().format("%Y-%m-%d %H:%M:%S");
-            let _ = writeln!(f, "[{ts}] {msg}");
-        }
+    if let Ok(mut guard) = DEBUG_LOG.lock()
+        && let Some(ref mut f) = *guard
+    {
+        let ts = Local::now().format("%Y-%m-%d %H:%M:%S");
+        let _ = writeln!(f, "[{ts}] {msg}");
     }
 }
 
@@ -181,10 +181,10 @@ impl KonserveConfig {
     /// A [`KonserveConfig`] struct with either persisted values or defaults.
     pub fn load() -> Self {
         let path = Self::config_path();
-        if let Ok(data) = fs::read_to_string(&path) {
-            if let Ok(cfg) = serde_json::from_str(&data) {
-                return cfg;
-            }
+        if let Ok(data) = fs::read_to_string(&path)
+            && let Ok(cfg) = serde_json::from_str(&data)
+        {
+            return cfg;
         }
         Self::default()
     }
