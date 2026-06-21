@@ -104,25 +104,23 @@ pub fn restore_backup(
     let mut to_extract: HashSet<String> = HashSet::new();
 
     if let Some(human_sel_raw) = &selected {
-        let human_sel: Vec<String> = human_sel_raw.iter().map(canon).collect();
+        let human_sel: HashSet<String> = human_sel_raw.iter().map(canon).collect();
 
         for (uuid, orig) in &path_map {
             let parent_c = canon(orig.parent().unwrap_or(orig).display().to_string());
             let item_name = orig.file_name().unwrap_or_default().to_string_lossy();
             let base = format!("{parent_c}/{item_name}");
+            let base_slash = format!("{base}/");
 
             if human_sel.contains(&base) {
                 to_extract.insert(uuid.clone());
 
-                // Also match UUID-based filename with extension
                 if let Some(ext) = orig.extension().and_then(|e| e.to_str()) {
                     to_extract.insert(format!("{uuid}.{ext}"));
                 }
             }
 
-            // Match files inside folder selctions
             for h in &human_sel {
-                let base_slash = format!("{base}/");
                 if let Some(rest) = h.strip_prefix(&base_slash) {
                     to_extract.insert(format!("{uuid}/{rest}"));
                 }
@@ -130,31 +128,8 @@ pub fn restore_backup(
         }
     }
 
-    let total_files: u32 = {
-        let mut arc = Archive::new(File::open(zip_path).map_err(|e| e.to_string())?);
-        arc.entries()
-            .map_err(|e| e.to_string())?
-            .filter_map(Result::ok)
-            .filter(|e| {
-                let ty = e.header().entry_type();
-                ty.is_file() || ty.is_dir()
-            })
-            .filter(|e| {
-                if selected.is_some() {
-                    let p = e
-                        .path()
-                        .ok()
-                        .map(|x| x.to_string_lossy().into_owned())
-                        .unwrap_or_default();
-                    to_extract.contains(&p)
-                } else {
-                    true
-                }
-            })
-            .count()
-            .max(1) as u32
-    };
-
+    // Count is tracked during extraction to avoid a second full archive pass.
+    let mut total_files: u32 = 1;
     let mut done: u32 = 0;
 
     if verbose { dlog!("[select]  to_extract = {to_extract:?}"); }
@@ -175,11 +150,17 @@ pub fn restore_backup(
             continue;
         }
 
-        // If selection is archive, skip any non-matching path
-        if selected.is_some() && !to_extract.contains(&path_in_tar) {
+        // If selection is active, skip entries that don't match exactly or aren't
+        // inside a selected top-level folder (uuid/ prefix).
+        if selected.is_some()
+            && !to_extract.contains(&path_in_tar)
+            && !to_extract.iter().any(|s| path_in_tar.starts_with(&format!("{s}/")))
+        {
             if verbose { dlog!("[skip]    {path_in_tar}  (not selected)"); }
             continue;
         }
+
+        total_files += 1;
 
         let tar_path = Path::new(&path_in_tar);
         let root_component = match tar_path.components().next() {
