@@ -759,6 +759,7 @@ impl eframe::App for GUIApp {
                                         .expect("failed to spawn backup thread");
     });
                             ui.add_sized(btn_size, egui::Button::new("Restore Backup"))
+                                .on_hover_text("⚠ Only restore archives you created yourself. Restoring untrusted archives can overwrite files on your system.")
                                 .clicked()
                                 .then(|| {
                                     let status = self.status.clone();
@@ -767,7 +768,7 @@ impl eframe::App for GUIApp {
                                         .pick_file()
                                     {
                                         self.restore_opening = true;
-                                        *status.lock().unwrap() = "Opening archive…".into();
+                                        *status.lock().unwrap() = "⚠ Only restore archives you created yourself — opening archive…".into();
 
                                         // Create a progress channel
                                         // This will be used to send the result of the restore operation
