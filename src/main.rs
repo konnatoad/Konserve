@@ -254,6 +254,9 @@ impl eframe::App for GUIApp {
     /// - `ctx`: egui context used to render the UI.
     /// - `_frame`: Frame handle (unused here).
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        egui::Frame::new()
+            .inner_margin(egui::Margin::symmetric(8, 4))
+            .show(ui, |ui| {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.add_space(4.0);
@@ -1069,5 +1072,6 @@ impl eframe::App for GUIApp {
                 }
             }
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+        }); // end margin frame
     }
 }
