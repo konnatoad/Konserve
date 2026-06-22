@@ -998,11 +998,13 @@ impl eframe::App for GUIApp {
                         });
 
                         if is_fixed {
-                            ui.horizontal(|ui| {
+                            let resp = ui.horizontal(|ui| {
                                 ui.add(egui::TextEdit::singleline(&mut self.backup_name_input).desired_width(160.0));
                                 ui.weak(format!("→ {}.tar", self.backup_name_input));
                             });
-                            self.backup_name_mode = BackupNameMode::Fixed(self.backup_name_input.clone());
+                            if resp.response.changed() {
+                                self.backup_name_mode = BackupNameMode::Fixed(self.backup_name_input.clone());
+                            }
                         } else {
                             let current_fmt = match &self.backup_name_mode {
                                 BackupNameMode::Timestamp(f) => f.clone(),
