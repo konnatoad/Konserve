@@ -21,22 +21,10 @@ use std::{
 };
 
 use chrono::Local;
-use serde::{Deserialize, Serialize};
 use tar::{Builder, Header};
 use uuid::Uuid;
 use walkdir::WalkDir;
 
-/// A reusable backup template for saving and loading user selected paths
-///
-/// Templates allow users to predefine which files or folders
-/// should be backed up, so they don't have to select them manually every time.
-///
-/// Saved as JSON using [`serde`].
-#[derive(Serialize, Deserialize)]
-struct BackupTemplate {
-    /// List of filesystem paths included in the template.
-    paths: Vec<PathBuf>,
-}
 
 /// Create a `.tar` backup archive of the given folders or files.
 ///
@@ -105,14 +93,6 @@ pub fn backup_gui(
         })
         .collect();
 
-    // Pre-count total files for progress tracking
-    let total_files: u32 = folders
-        .iter()
-        .flat_map(|p| WalkDir::new(p).into_iter().filter_map(Result::ok))
-        .filter(|e| e.file_type().is_file())
-        .count()
-        .max(1) as u32;
-
     let mut done = 0u32;
 
     // Write UUID ↔ original path mappings to fingerprint section
@@ -136,10 +116,29 @@ pub fn backup_gui(
         .map_err(|e| e.to_string())?;
     if verbose { dlog!("[DEBUG] fingerprint.txt added to archive"); }
 
-    // === Main archive population ===
-    for (uuid, original_path) in folder_uuid {
+    // Pre-collect all entries so we count and iterate in one filesystem pass.
+    // Each element is (uuid, original_path, walk_entries_or_none).
+    let mut all_entries: Vec<(Uuid, &PathBuf, Vec<walkdir::DirEntry>)> = Vec::new();
+    let mut total_files: u32 = 0;
+
+    for (uuid, original_path) in &folder_uuid {
         if original_path.is_file() {
-            // Top-level file (not inside folder): encode directly using UUID as name
+            total_files += 1;
+            all_entries.push((*uuid, original_path, Vec::new()));
+        } else {
+            let entries: Vec<_> = WalkDir::new(original_path)
+                .into_iter()
+                .filter_map(Result::ok)
+                .collect();
+            total_files += entries.iter().filter(|e| e.file_type().is_file()).count() as u32;
+            all_entries.push((*uuid, original_path, entries));
+        }
+    }
+    let total_files = total_files.max(1);
+
+    // === Main archive population ===
+    for (uuid, original_path, walk_entries) in all_entries {
+        if original_path.is_file() {
             if verbose { dlog!("[DEBUG] Adding single file: {}", original_path.display()); }
 
             let metadata = original_path.metadata().map_err(|e| e.to_string())?;
@@ -165,17 +164,12 @@ pub fn backup_gui(
             continue;
         }
 
-        // Handle directory entries (recursive walk)
         if verbose { dlog!("[DEBUG] Walking folder: {}", original_path.display()); }
 
-        for entry in WalkDir::new(original_path)
-            .into_iter()
-            .filter_map(Result::ok)
-        {
+        for entry in walk_entries {
             let entry_path = entry.path();
             let metadata = entry.metadata().map_err(|e| e.to_string())?;
 
-            // Relative path from root -> mapped under UUID root
             let relative_path = entry_path.strip_prefix(original_path).unwrap();
             let tar_entry_path = Path::new(&uuid.to_string()).join(relative_path);
 
@@ -193,7 +187,6 @@ pub fn backup_gui(
                 done += 1;
                 progress.set(done * 100 / total_files);
             } else if metadata.is_dir() {
-                // Directory entries are included for structure but written as empty
                 if verbose { dlog!("[DEBUG] Adding directory: {}", entry_path.display()); }
                 tar_builder
                     .append_data(&mut header, tar_entry_path, io::empty())
