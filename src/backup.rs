@@ -68,6 +68,7 @@ pub fn backup_gui(
     filename: &str,
     progress: &Progress,
     verbose: bool,
+    skip_locked: bool,
 ) -> Result<PathBuf, String> {
     if verbose {
         dlog!("[DEBUG] backup_gui: Started");
@@ -146,7 +147,18 @@ pub fn backup_gui(
             header.set_metadata(&metadata);
             header.set_cksum();
 
-            let mut f = File::open(original_path).map_err(|e| e.to_string())?;
+            let mut f = match File::open(original_path) {
+                Ok(f) => f,
+                Err(e) => {
+                    if skip_locked {
+                        dlog!("[WARN] Skipping inaccessible file {}: {e}", original_path.display());
+                        done += 1;
+                        progress.set(done * 100 / total_files);
+                        continue;
+                    }
+                    return Err(e.to_string());
+                }
+            };
 
             let entry_name = match original_path.extension().and_then(|e| e.to_str()) {
                 Some(ext) => format!("{uuid}.{ext}"),
@@ -154,9 +166,15 @@ pub fn backup_gui(
             };
             if verbose { dlog!("[DEBUG] -> Entry name in tar: {entry_name}"); }
 
-            tar_builder
-                .append_data(&mut header, entry_name, &mut f)
-                .map_err(|e| e.to_string())?;
+            if let Err(e) = tar_builder.append_data(&mut header, entry_name, &mut f) {
+                if skip_locked {
+                    dlog!("[WARN] Skipping file {} (write error: {e})", original_path.display());
+                    done += 1;
+                    progress.set(done * 100 / total_files);
+                    continue;
+                }
+                return Err(e.to_string());
+            }
 
             done += 1;
             progress.set(done * 100 / total_files);
@@ -179,10 +197,27 @@ pub fn backup_gui(
 
             if metadata.is_file() {
                 if verbose { dlog!("[DEBUG] Adding file: {}", entry_path.display()); }
-                let mut file = File::open(entry_path).map_err(|e| e.to_string())?;
-                tar_builder
-                    .append_data(&mut header, tar_entry_path, &mut file)
-                    .map_err(|e| e.to_string())?;
+                let mut file = match File::open(entry_path) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        if skip_locked {
+                            dlog!("[WARN] Skipping inaccessible file {}: {e}", entry_path.display());
+                            done += 1;
+                            progress.set(done * 100 / total_files);
+                            continue;
+                        }
+                        return Err(e.to_string());
+                    }
+                };
+                if let Err(e) = tar_builder.append_data(&mut header, tar_entry_path, &mut file) {
+                    if skip_locked {
+                        dlog!("[WARN] Skipping file {} (write error: {e})", entry_path.display());
+                        done += 1;
+                        progress.set(done * 100 / total_files);
+                        continue;
+                    }
+                    return Err(e.to_string());
+                }
 
                 done += 1;
                 progress.set(done * 100 / total_files);
