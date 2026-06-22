@@ -404,6 +404,18 @@ pub fn build_human_tree(
     if verbose { dlog!("[DEBUG] build_human_tree: Start"); }
     let mut root = FolderTreeNode::default();
 
+    // Pre-group entries by UUID prefix so each UUID lookup is O(1) instead of
+    // scanning the full entry list once per UUID.
+    let mut entries_by_uuid: HashMap<String, Vec<String>> = HashMap::new();
+    for e in &entries {
+        if let Some(slash) = e.find('/') {
+            entries_by_uuid
+                .entry(e[..slash].to_string())
+                .or_default()
+                .push(e.clone());
+        }
+    }
+
     for (uuid, original_path) in path_map {
         if verbose { dlog!("[DEBUG] Processing UUID: {uuid}, Path: {original_path:?}"); }
 
@@ -430,14 +442,13 @@ pub fn build_human_tree(
             .entry(item_name.clone())
             .or_insert_with(FolderTreeNode::default);
 
-        let dir_prefix = format!("{uuid}/"); // Create a prefix for directory entries based on the UUID.
-        let is_dir_backup = entries.iter().any(|e| e.starts_with(&dir_prefix)); // Check if there are any entries that start with the UUID prefix.
+        let dir_prefix = format!("{uuid}/");
 
-        if is_dir_backup {
+        if let Some(uuid_entries) = entries_by_uuid.get(&uuid) {
             if verbose { dlog!("[DEBUG] Detected directory backup for UUID: {uuid}"); }
             parent_node.children.get_mut(&item_name).unwrap().is_file = false;
 
-            for tar_path in entries.iter().filter(|e| e.starts_with(&dir_prefix)) {
+            for tar_path in uuid_entries {
                 if verbose { dlog!("[DEBUG]   tar_path = \"{tar_path}\""); }
 
                 let rest = tar_path[dir_prefix.len()..].trim_end_matches('/');
@@ -448,7 +459,7 @@ pub fn build_human_tree(
 
                 if verbose { dlog!("[DEBUG]   Rest path: \"{rest}\""); }
 
-                let mut cursor = parent_node.children.get_mut(&item_name).unwrap(); // Get the item
+                let mut cursor = parent_node.children.get_mut(&item_name).unwrap();
                 for part in rest.split('/') {
                     if verbose { dlog!("[DEBUG]     Descending into part: \"{part}\""); }
                     cursor = cursor
