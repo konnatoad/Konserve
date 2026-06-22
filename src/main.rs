@@ -39,6 +39,34 @@ use eframe::egui;
 use rfd::FileDialog;
 use serde::{Deserialize, Serialize};
 
+/// A known app that may lock files during backup.
+struct KnownApp {
+    /// Display name shown in the prompt.
+    name: &'static str,
+    /// Process executable name to detect and kill.
+    process: &'static str,
+    /// Executable path to relaunch after backup (Windows only).
+    relaunch: Option<&'static str>,
+}
+
+const KNOWN_APPS: &[KnownApp] = &[
+    KnownApp { name: "Discord / Vesktop", process: "vesktop.exe",    relaunch: None },
+    KnownApp { name: "Discord",           process: "Discord.exe",    relaunch: None },
+    KnownApp { name: "Steam",             process: "steam.exe",      relaunch: Some("C:\\Program Files (x86)\\Steam\\steam.exe") },
+    KnownApp { name: "OBS Studio",        process: "obs64.exe",      relaunch: None },
+    KnownApp { name: "Zen Browser",       process: "zen.exe",        relaunch: None },
+    KnownApp { name: "Spotify",           process: "Spotify.exe",    relaunch: None },
+];
+
+/// Pending backup job waiting on the app-conflict prompt.
+struct PendingBackup {
+    folders: Vec<PathBuf>,
+    out_dir: PathBuf,
+    filename: String,
+    /// Apps that were detected as running.
+    detected: Vec<usize>, // indices into KNOWN_APPS
+}
+
 /// Type alias for messages exchanged during restore operations.
 ///
 /// Used internally to communicate results of parsing a backup archive.
@@ -190,6 +218,7 @@ struct GUIApp {
     // temporary string buffer for the name input in settings
     backup_name_input: String,
     overwrite_confirm: Option<PathBuf>,
+    pending_backup: Option<PendingBackup>,
     config: helpers::KonserveConfig,
 }
 
@@ -229,12 +258,95 @@ impl Default for GUIApp {
             },
             backup_name_mode: config.backup_name_mode.clone(),
             overwrite_confirm: None,
+            pending_backup: None,
             config,
         };
         if app.verbose_logging {
             helpers::init_verbose_log();
         }
         app
+    }
+}
+
+impl GUIApp {
+    /// Returns indices into KNOWN_APPS for any apps currently running.
+    fn detect_conflicting_apps(folders: &[PathBuf]) -> Vec<usize> {
+        #[cfg(target_os = "windows")]
+        {
+            let output = std::process::Command::new("tasklist")
+                .args(["/fo", "csv", "/nh"])
+                .output();
+            let Ok(output) = output else { return vec![]; };
+            let list = String::from_utf8_lossy(&output.stdout).to_lowercase();
+            KNOWN_APPS.iter().enumerate()
+                .filter(|(_, app)| {
+                    let proc = app.process.to_lowercase();
+                    // Only flag if the app's paths overlap with selected folders
+                    let relevant = KNOWN_APPS.iter().position(|a| a.process == app.process)
+                        .map(|_| folders.iter().any(|f| {
+                            let fp = f.to_string_lossy().to_lowercase();
+                            // Heuristic: check if folder path contains a keyword from the process name
+                            let keyword = proc.trim_end_matches(".exe");
+                            fp.contains(keyword) || fp.contains("appdata")
+                        }))
+                        .unwrap_or(true);
+                    relevant && list.contains(&proc)
+                })
+                .map(|(i, _)| i)
+                .collect()
+        }
+        #[cfg(not(target_os = "windows"))]
+        { vec![] }
+    }
+
+    /// Kill a known app by process name and return its relaunch path if set.
+    fn kill_app(app: &KnownApp) {
+        #[cfg(target_os = "windows")]
+        let _ = std::process::Command::new("taskkill")
+            .args(["/f", "/im", app.process])
+            .output();
+    }
+
+    /// Relaunch an app if it has a relaunch path configured.
+    fn relaunch_app(app: &KnownApp) {
+        if let Some(exe) = app.relaunch {
+            let _ = std::process::Command::new(exe).spawn();
+        }
+    }
+
+    /// Spawn the backup thread. Called after any app-conflict prompt is resolved.
+    fn start_backup(
+        &mut self,
+        folders: Vec<PathBuf>,
+        out_dir: PathBuf,
+        filename: String,
+        skip_locked: bool,
+        relaunch: Vec<&'static str>,
+    ) {
+        let status = self.status.clone();
+        let progress = Progress::default();
+        self.backup_progress = Some(progress.clone());
+        let verbose = self.verbose_logging;
+
+        *status.lock().unwrap() = "Packing into .tar".into();
+
+        std::thread::Builder::new()
+            .name("konserve-backup".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || {
+                match backup_gui(&folders, &out_dir, &filename, &progress, verbose, skip_locked) {
+                    Ok(path) => {
+                        *status.lock().unwrap() = format!("✅ Backup created:\n{}", path.display());
+                    }
+                    Err(e) => {
+                        *status.lock().unwrap() = format!("❌ Backup failed: {e}");
+                    }
+                }
+                for exe in relaunch {
+                    let _ = std::process::Command::new(exe).spawn();
+                }
+            })
+            .expect("failed to spawn backup thread");
     }
 }
 
@@ -294,7 +406,7 @@ impl eframe::App for GUIApp {
                             .name("konserve-backup".into())
                             .stack_size(8 * 1024 * 1024)
                             .spawn(move || {
-                                match backup_gui(&folders, &out_dir, &filename, &progress, verbose) {
+                                match backup_gui(&folders, &out_dir, &filename, &progress, verbose, false) {
                                     Ok(path) => { *status.lock().unwrap() = format!("✅ Backup created:\n{}", path.display()); }
                                     Err(e) => { *status.lock().unwrap() = format!("❌ Backup failed: {e}"); }
                                 }
@@ -303,6 +415,39 @@ impl eframe::App for GUIApp {
                     }
                     if ui.button("Cancel").clicked() {
                         self.overwrite_confirm = None;
+                        *self.status.lock().unwrap() = "❌ Cancelled.".into();
+                    }
+                });
+                ui.separator();
+            }
+
+            // App-conflict prompt
+            if let Some(ref pending) = self.pending_backup {
+                ui.separator();
+                ui.colored_label(egui::Color32::YELLOW, "⚠ The following apps may be locking files:");
+                for &i in &pending.detected {
+                    ui.label(format!("  • {}", KNOWN_APPS[i].name));
+                }
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Close apps & backup").clicked() {
+                        let pending = self.pending_backup.take().unwrap();
+                        let relaunch: Vec<&'static str> = pending.detected.iter()
+                            .filter_map(|&i| {
+                                Self::kill_app(&KNOWN_APPS[i]);
+                                KNOWN_APPS[i].relaunch
+                            })
+                            .collect();
+                        // Small delay to let processes exit before backup starts
+                        std::thread::sleep(std::time::Duration::from_millis(800));
+                        self.start_backup(pending.folders, pending.out_dir, pending.filename, false, relaunch);
+                    }
+                    if ui.button("Skip locked files").clicked() {
+                        let pending = self.pending_backup.take().unwrap();
+                        self.start_backup(pending.folders, pending.out_dir, pending.filename, true, vec![]);
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.pending_backup = None;
                         *self.status.lock().unwrap() = "❌ Cancelled.".into();
                     }
                 });
@@ -735,26 +880,17 @@ impl eframe::App for GUIApp {
                                         return;
                                     }
 
-                                    *status.lock().unwrap() = "Packing into .tar".into();
-
-                                    let progress = Progress::default();
-                                    self.backup_progress = Some(progress.clone());
-                                    let verbose = self.verbose_logging;
-
-                                    std::thread::Builder::new()
-                                        .name("konserve-backup".into())
-                                        .stack_size(8 * 1024 * 1024)
-                                        .spawn(move || {
-                                            match backup_gui(&folders, &out_dir, &filename, &progress, verbose) {
-                                                Ok(path) => {
-                                                    *status.lock().unwrap() = format!("✅ Backup created:\n{}", path.display());
-                                                }
-                                                Err(e) => {
-                                                    *status.lock().unwrap() = format!("❌ Backup failed: {e}");
-                                                }
-                                            }
-                                        })
-                                        .expect("failed to spawn backup thread");
+                                    let detected = Self::detect_conflicting_apps(&folders);
+                                    if detected.is_empty() {
+                                        self.start_backup(folders, out_dir, filename, false, vec![]);
+                                    } else {
+                                        self.pending_backup = Some(PendingBackup {
+                                            folders,
+                                            out_dir,
+                                            filename,
+                                            detected,
+                                        });
+                                    }
     });
                             ui.add_sized(btn_size, egui::Button::new("Restore Backup"))
                                 .on_hover_text("⚠ Only restore archives you created yourself. Restoring untrusted archives can overwrite files on your system.")
