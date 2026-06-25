@@ -28,6 +28,7 @@ use std::{
 };
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
+#[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 use chrono::Local;
@@ -282,6 +283,7 @@ impl GUIApp {
         folders: Vec<PathBuf>,
         out_dir: PathBuf,
         filename: String,
+        #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
         processes: Vec<&'static str>,
         relaunch: Vec<&'static str>,
     ) {
