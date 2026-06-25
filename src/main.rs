@@ -24,6 +24,7 @@ use helpers::load_icon_image;
 use helpers::parse_fingerprint;
 use helpers::render_tree;
 use helpers::verbose_log_path;
+use helpers::init_crash_log;
 use restore::{ConflictAnswer, restore_backup};
 
 use std::{
@@ -159,9 +160,18 @@ fn build_tree_from_paths(paths: &[String]) -> FolderTreeNode {
 ///
 /// Returns an [`eframe::Error`] if the GUI fails to start.
 fn main() -> Result<(), eframe::Error> {
-    dotenv::dotenv().ok(); // Load environment variables from .env if available
+    dotenv::dotenv().ok();
 
-    let icon = load_icon_image(); // Load application image
+    init_crash_log();
+
+    // Catch panics and write them to the crash log before the process dies.
+    std::panic::set_hook(Box::new(|info| {
+        let msg = info.to_string();
+        helpers::write_crash_log(&format!("PANIC: {msg}"));
+        eprintln!("PANIC: {msg}");
+    }));
+
+    let icon = load_icon_image();
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -171,11 +181,17 @@ fn main() -> Result<(), eframe::Error> {
         ..Default::default()
     };
 
-    eframe::run_native(
+    let result = eframe::run_native(
         "Konserve",
         options,
         Box::new(|_cc| Ok(Box::new(GUIApp::default()))),
-    )
+    );
+
+    if let Err(ref e) = result {
+        helpers::write_crash_log(&format!("eframe error: {e}"));
+    }
+
+    result
 }
 
 /// Tabs available in the Konserve user interface.
@@ -376,6 +392,7 @@ impl GUIApp {
                         *status.lock().unwrap() = format!("✅ Backup created:\n{}", path.display());
                     }
                     Err(e) => {
+                        clog!("ERROR: backup failed: {e}");
                         *status.lock().unwrap() = format!("❌ Backup failed: {e}");
                     }
                 }
@@ -417,6 +434,7 @@ impl GUIApp {
                         *status.lock().unwrap() = format!("✅ Backup created:\n{}", path.display());
                     }
                     Err(e) => {
+                        clog!("ERROR: backup failed: {e}");
                         *status.lock().unwrap() = format!("❌ Backup failed: {e}");
                     }
                 }
@@ -487,7 +505,10 @@ impl eframe::App for GUIApp {
                             .spawn(move || {
                                 match backup_gui(&folders, &out_dir, &filename, &progress, verbose, false) {
                                     Ok(path) => { *status.lock().unwrap() = format!("✅ Backup created:\n{}", path.display()); }
-                                    Err(e) => { *status.lock().unwrap() = format!("❌ Backup failed: {e}"); }
+                                    Err(e) => {
+                                        clog!("ERROR: backup failed: {e}");
+                                        *status.lock().unwrap() = format!("❌ Backup failed: {e}");
+                                    }
                                 }
                             })
                             .expect("failed to spawn backup thread");
@@ -695,6 +716,7 @@ impl eframe::App for GUIApp {
                         if let Err(e) =
                             restore_backup(&zip_path, Some(selected), status.clone(), &progress, verbose, mode, conflict_ch)
                         {
+                            clog!("ERROR: restore failed: {e}");
                             *status.lock().unwrap() = format!("❌ Restore failed: {e}");
                         }
                     });
@@ -751,6 +773,7 @@ impl eframe::App for GUIApp {
                                 *self.status.lock().unwrap() = String::new();
                             }
                             Err(e) => {
+                                clog!("ERROR: failed to open archive: {e}");
                                 *self.status.lock().unwrap() = format!("❌ Failed to open archive: {e}");
                             }
                         }

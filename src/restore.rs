@@ -6,7 +6,7 @@
 //! Reconstructs file paths from UUID mappings
 //! Supports restoring either the entire backup or a subset chosen in the UI
 use crate::helpers::{ConflictResolutionMode, Progress, adjust_path, get_fingered};
-use crate::dlog;
+use crate::{dlog, clog};
 use std::{
     collections::{HashMap, HashSet},
     fs::{self, File},
@@ -125,7 +125,10 @@ pub fn restore_backup(
     *status.lock().unwrap() = "Restoring backup…".into();
 
     // Open archive and locate fingerprint
-    let mut archive = Archive::new(File::open(zip_path).map_err(|e| e.to_string())?);
+    let mut archive = Archive::new(File::open(zip_path).map_err(|e| {
+        let msg = format!("ERROR: cannot open archive {}: {e}", zip_path.display());
+        clog!("{msg}"); msg
+    })?);
     let mut path_map: HashMap<String, PathBuf> = HashMap::new();
     let mut valid_fingerprint = false;
 
@@ -154,6 +157,7 @@ pub fn restore_backup(
     }
 
     if !valid_fingerprint {
+        clog!("ERROR: restore aborted — invalid or missing backup fingerprint in {}", zip_path.display());
         return Err("Invalid backup fingerprint.".into());
     }
 
@@ -194,7 +198,10 @@ pub fn restore_backup(
 
     // Begin extraction
     let current_home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("C:\\"));
-    let mut archive = Archive::new(File::open(zip_path).map_err(|e| e.to_string())?);
+    let mut archive = Archive::new(File::open(zip_path).map_err(|e| {
+        let msg = format!("ERROR: cannot reopen archive for extraction {}: {e}", zip_path.display());
+        clog!("{msg}"); msg
+    })?);
 
     if verbose { dlog!("[extract] scanning archive…"); }
     let mut restored_count = 0;
@@ -241,9 +248,15 @@ pub fn restore_backup(
 
             if let Some(final_path) = resolve_conflict(&unpack_to, mode, &conflict_ch) {
                 if let Some(dir) = final_path.parent() {
-                    fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+                    fs::create_dir_all(dir).map_err(|e| {
+                        let msg = format!("ERROR: failed to create dir {}: {e}", dir.display());
+                        clog!("{msg}"); msg
+                    })?;
                 }
-                entry.unpack(&final_path).map_err(|e| e.to_string())?;
+                entry.unpack(&final_path).map_err(|e| {
+                    let msg = format!("ERROR: failed to unpack {} → {}: {e}", path_in_tar, final_path.display());
+                    clog!("{msg}"); msg
+                })?;
                 restored_count += 1;
             } else {
                 if verbose { dlog!("[skip] conflict: {}", unpack_to.display()); }
@@ -259,9 +272,15 @@ pub fn restore_backup(
 
                 if let Some(final_path) = resolve_conflict(&unpack_to, mode, &conflict_ch) {
                     if let Some(dir) = final_path.parent() {
-                        fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+                        fs::create_dir_all(dir).map_err(|e| {
+                            let msg = format!("ERROR: failed to create dir {}: {e}", dir.display());
+                            clog!("{msg}"); msg
+                        })?;
                     }
-                    entry.unpack(&final_path).map_err(|e| e.to_string())?;
+                    entry.unpack(&final_path).map_err(|e| {
+                        let msg = format!("ERROR: failed to unpack {} → {}: {e}", path_in_tar, final_path.display());
+                        clog!("{msg}"); msg
+                    })?;
                     restored_count += 1;
                 } else {
                     if verbose { dlog!("[skip] conflict: {}", unpack_to.display()); }

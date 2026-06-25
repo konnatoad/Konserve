@@ -13,7 +13,7 @@
 //! - Current format is `.tar`. `.tar.gz` support is planned but not yet active.
 //! - Old `.zip` format is deprecated and left as commented legacy code.
 use crate::helpers::{Progress, get_fingered};
-use crate::dlog;
+use crate::{dlog, clog};
 use std::{
     fs::File,
     io,
@@ -78,7 +78,10 @@ pub fn backup_gui(
     let zip_path = output_dir.join(filename);
     if verbose { dlog!("[DEBUG] Creating backup archive: {}", zip_path.display()); }
 
-    let tar_file = File::create(&zip_path).map_err(|e| e.to_string())?;
+    let tar_file = File::create(&zip_path).map_err(|e| {
+        let msg = format!("ERROR: failed to create archive {}: {e}", zip_path.display());
+        clog!("{msg}"); msg
+    })?;
     let mut tar_builder = Builder::new(tar_file);
 
     // Start the fingerprint with identifier + info section
@@ -156,6 +159,7 @@ pub fn backup_gui(
                         progress.set(done * 100 / total_files);
                         continue;
                     }
+                    clog!("ERROR: cannot open file {}: {e}", original_path.display());
                     return Err(e.to_string());
                 }
             };
@@ -173,6 +177,7 @@ pub fn backup_gui(
                     progress.set(done * 100 / total_files);
                     continue;
                 }
+                clog!("ERROR: failed to write {} to archive: {e}", original_path.display());
                 return Err(e.to_string());
             }
 
@@ -206,6 +211,7 @@ pub fn backup_gui(
                             progress.set(done * 100 / total_files);
                             continue;
                         }
+                        clog!("ERROR: cannot open file {}: {e}", entry_path.display());
                         return Err(e.to_string());
                     }
                 };
@@ -216,6 +222,7 @@ pub fn backup_gui(
                         progress.set(done * 100 / total_files);
                         continue;
                     }
+                    clog!("ERROR: failed to write {} to archive: {e}", entry_path.display());
                     return Err(e.to_string());
                 }
 
@@ -231,7 +238,10 @@ pub fn backup_gui(
     }
 
     // Finalize and flush .tar structure to disk
-    tar_builder.finish().map_err(|e| e.to_string())?;
+    tar_builder.finish().map_err(|e| {
+        let msg = format!("ERROR: failed to finalize archive {}: {e}", zip_path.display());
+        clog!("{msg}"); msg
+    })?;
     if verbose { dlog!("[DEBUG] Archive finished: {}", zip_path.display()); }
 
     progress.done();
