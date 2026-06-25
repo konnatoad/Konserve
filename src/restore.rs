@@ -5,16 +5,72 @@
 //! Validates the archive using fingerprint.txt
 //! Reconstructs file paths from UUID mappings
 //! Supports restoring either the entire backup or a subset chosen in the UI
-use crate::helpers::{Progress, adjust_path, get_fingered};
+use crate::helpers::{ConflictResolutionMode, Progress, adjust_path, get_fingered};
 use crate::dlog;
 use std::{
     collections::{HashMap, HashSet},
     fs::{self, File},
     io::Read,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, mpsc},
 };
 use tar::Archive;
+
+/// Per-file answer sent from the UI back to a paused restore thread.
+pub enum ConflictAnswer {
+    Overwrite,
+    Skip,
+    Rename,
+}
+
+/// Return the path to write to, or `None` to skip the file.
+fn resolve_conflict(
+    dest: &Path,
+    mode: ConflictResolutionMode,
+    ch: &Option<(mpsc::Sender<PathBuf>, mpsc::Receiver<ConflictAnswer>)>,
+) -> Option<PathBuf> {
+    if !dest.exists() {
+        return Some(dest.to_path_buf());
+    }
+    match mode {
+        ConflictResolutionMode::Overwrite => Some(dest.to_path_buf()),
+        ConflictResolutionMode::Skip => None,
+        ConflictResolutionMode::Rename => Some(unique_path(dest)),
+        ConflictResolutionMode::Prompt => {
+            if let Some((tx, rx)) = ch {
+                if tx.send(dest.to_path_buf()).is_err() {
+                    return None;
+                }
+                match rx.recv() {
+                    Ok(ConflictAnswer::Overwrite) => Some(dest.to_path_buf()),
+                    Ok(ConflictAnswer::Skip) => None,
+                    Ok(ConflictAnswer::Rename) => Some(unique_path(dest)),
+                    Err(_) => None,
+                }
+            } else {
+                Some(dest.to_path_buf())
+            }
+        }
+    }
+}
+
+/// Append `_1`, `_2`, … before the extension until a free path is found.
+fn unique_path(dest: &Path) -> PathBuf {
+    let stem = dest.file_stem().unwrap_or_default().to_string_lossy();
+    let ext = dest
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    let parent = dest.parent().unwrap_or_else(|| Path::new(""));
+    let mut i = 1u32;
+    loop {
+        let candidate = parent.join(format!("{stem}_{i}{ext}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+        i += 1;
+    }
+}
 
 /// Normalize a string path to a canonical form.
 ///
@@ -63,6 +119,8 @@ pub fn restore_backup(
     status: Arc<Mutex<String>>,
     progress: &Progress,
     verbose: bool,
+    mode: ConflictResolutionMode,
+    conflict_ch: Option<(mpsc::Sender<PathBuf>, mpsc::Receiver<ConflictAnswer>)>,
 ) -> Result<(), String> {
     *status.lock().unwrap() = "Restoring backup…".into();
 
@@ -181,11 +239,15 @@ pub fn restore_backup(
             let unpack_to = adjusted_base.join(rel);
             if verbose { dlog!("[write] dir {path_in_tar}  →  {}", unpack_to.display()); }
 
-            if let Some(dir) = unpack_to.parent() {
-                fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+            if let Some(final_path) = resolve_conflict(&unpack_to, mode, &conflict_ch) {
+                if let Some(dir) = final_path.parent() {
+                    fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+                }
+                entry.unpack(&final_path).map_err(|e| e.to_string())?;
+                restored_count += 1;
+            } else {
+                if verbose { dlog!("[skip] conflict: {}", unpack_to.display()); }
             }
-            entry.unpack(&unpack_to).map_err(|e| e.to_string())?;
-            restored_count += 1;
             done += 1;
             progress.set((done * 100) / total_files);
         }
@@ -195,11 +257,15 @@ pub fn restore_backup(
                 let unpack_to = adjust_path(orig_file, &current_home, verbose);
                 if verbose { dlog!("[write] file {path_in_tar}  →  {}", unpack_to.display()); }
 
-                if let Some(dir) = unpack_to.parent() {
-                    fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+                if let Some(final_path) = resolve_conflict(&unpack_to, mode, &conflict_ch) {
+                    if let Some(dir) = final_path.parent() {
+                        fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+                    }
+                    entry.unpack(&final_path).map_err(|e| e.to_string())?;
+                    restored_count += 1;
+                } else {
+                    if verbose { dlog!("[skip] conflict: {}", unpack_to.display()); }
                 }
-                entry.unpack(&unpack_to).map_err(|e| e.to_string())?;
-                restored_count += 1;
                 done += 1;
                 progress.set((done * 100) / total_files);
             } else {
