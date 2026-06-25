@@ -29,6 +29,7 @@ use chrono::Local;
 use tar::Archive;
 
 static DEBUG_LOG: Mutex<Option<File>> = Mutex::new(None);
+static CRASH_LOG: Mutex<Option<File>> = Mutex::new(None);
 
 /// Returns the path of the verbose log file.
 pub fn verbose_log_path() -> PathBuf {
@@ -36,6 +37,43 @@ pub fn verbose_log_path() -> PathBuf {
         .parent()
         .unwrap_or(Path::new("."))
         .join("konserve.log")
+}
+
+/// Returns the path of the crash/error log file (next to the exe).
+pub fn crash_log_path() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("konserve-crash.log")))
+        .unwrap_or_else(|| PathBuf::from("konserve-crash.log"))
+}
+
+/// Opens (or creates) the crash log file next to the exe.
+/// Called once at startup — always on, no toggle.
+pub fn init_crash_log() {
+    let path = crash_log_path();
+    if let Ok(f) = OpenOptions::new().create(true).append(true).open(&path)
+        && let Ok(mut guard) = CRASH_LOG.lock()
+    {
+        *guard = Some(f);
+    }
+}
+
+/// Appends a timestamped error or crash message to the crash log.
+pub fn write_crash_log(msg: &str) {
+    let ts = Local::now().format("%Y-%m-%d %H:%M:%S");
+    if let Ok(mut guard) = CRASH_LOG.lock()
+        && let Some(ref mut f) = *guard
+    {
+        let _ = writeln!(f, "[{ts}] {msg}");
+        let _ = f.flush();
+    }
+}
+
+#[macro_export]
+macro_rules! clog {
+    ($($arg:tt)*) => {
+        $crate::helpers::write_crash_log(&format!($($arg)*))
+    }
 }
 
 /// Opens (and truncates) the verbose log file next to the config.
