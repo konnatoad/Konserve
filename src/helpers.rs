@@ -36,25 +36,23 @@ pub fn crash_log_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("konserve-crash.log"))
 }
 
-/// Opens (or creates) the crash log file next to the exe.
-/// Called once at startup — always on, no toggle.
-pub fn init_crash_log() {
-    let path = crash_log_path();
-    if let Ok(f) = OpenOptions::new().create(true).append(true).open(&path)
-        && let Ok(mut guard) = CRASH_LOG.lock()
-    {
-        *guard = Some(f);
-    }
-}
+/// No-op — kept so call sites in main.rs don't need changing.
+pub fn init_crash_log() {}
 
-/// Appends a timestamped error or crash message to the crash log.
+/// Appends a timestamped message to the crash log, creating the file on first write.
 pub fn write_crash_log(msg: &str) {
     let ts = Local::now().format("%Y-%m-%d %H:%M:%S");
-    if let Ok(mut guard) = CRASH_LOG.lock()
-        && let Some(ref mut f) = *guard
-    {
-        let _ = writeln!(f, "[{ts}] {msg}");
-        let _ = f.flush();
+    if let Ok(mut guard) = CRASH_LOG.lock() {
+        if guard.is_none() {
+            let path = crash_log_path();
+            if let Ok(f) = OpenOptions::new().create(true).append(true).open(&path) {
+                *guard = Some(f);
+            }
+        }
+        if let Some(ref mut f) = *guard {
+            let _ = writeln!(f, "[{ts}] {msg}");
+            let _ = f.flush();
+        }
     }
 }
 
