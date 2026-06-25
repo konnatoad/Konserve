@@ -69,6 +69,9 @@ type RestoreMsg = Result<(FolderTreeNode, PathBuf), String>;
 /// Paths returned from a background file dialog.
 type FileDialogMsg = Vec<PathBuf>;
 
+/// Result from the background app-detection thread.
+type DetectResult = (Vec<usize>, Vec<PathBuf>, PathBuf, String);
+
 /// A saved set of paths that can be reloaded for future backups.
 #[derive(Serialize, Deserialize)]
 struct BackupTemplate {
@@ -186,7 +189,7 @@ struct GUIApp {
     conflict_file: Option<PathBuf>,
     pending_backup: Option<PendingBackup>,
     detecting_apps: bool,
-    detect_rx: Option<mpsc::Receiver<(Vec<usize>, Vec<PathBuf>, PathBuf, String)>>,
+    detect_rx: Option<mpsc::Receiver<DetectResult>>,
     config: helpers::KonserveConfig,
 }
 
@@ -478,10 +481,10 @@ impl eframe::App for GUIApp {
             }
 
             // Poll restore conflict channel and show per-file prompt
-            if self.conflict_file.is_none() {
-                if let Some(path) = self.conflict_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
-                    self.conflict_file = Some(path);
-                }
+            if self.conflict_file.is_none()
+                && let Some(path) = self.conflict_rx.as_ref().and_then(|rx| rx.try_recv().ok())
+            {
+                self.conflict_file = Some(path);
             }
             if let Some(ref path) = self.conflict_file.clone() {
                 ui.separator();
