@@ -475,6 +475,7 @@ impl eframe::App for GUIApp {
                     };
                     if ui.selectable_label(active, text).clicked() {
                         self.tab = tab;
+                        *self.status.lock().unwrap() = String::new();
                     }
                 }
             });
@@ -719,11 +720,9 @@ impl eframe::App for GUIApp {
 
                 if ui.button("Cancel").clicked() {
                     self.restore_editor = false;
+                    self.restore_opening = false;
                     self.restore_zip_path = None;
                     self.restore_tree = FolderTreeNode::default();
-                    self.conflict_file = None;
-                    self.conflict_rx = None;
-                    self.conflict_answer_tx = None;
                     *self.status.lock().unwrap() = String::new();
                 }
 
@@ -764,6 +763,8 @@ impl eframe::App for GUIApp {
                                 self.restore_tree = tree;
                                 self.restore_zip_path = Some(zip);
                                 self.restore_editor = true;
+                                self.restore_opening = false;
+                                *self.status.lock().unwrap() = String::new();
                             }
                             Err(e) => {
                                 *self.status.lock().unwrap() = format!("❌ Failed to open archive: {e}");
