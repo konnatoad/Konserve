@@ -24,7 +24,7 @@ use helpers::load_icon_image;
 use helpers::parse_fingerprint;
 use helpers::render_tree;
 use helpers::verbose_log_path;
-use restore::restore_backup;
+use restore::{ConflictAnswer, restore_backup};
 
 use std::{
     collections::HashMap,
@@ -221,6 +221,9 @@ struct GUIApp {
     // temporary string buffer for the name input in settings
     backup_name_input: String,
     overwrite_confirm: Option<PathBuf>,
+    conflict_rx: Option<mpsc::Receiver<PathBuf>>,
+    conflict_answer_tx: Option<mpsc::Sender<ConflictAnswer>>,
+    conflict_file: Option<PathBuf>,
     pending_backup: Option<PendingBackup>,
     detecting_apps: bool,
     detect_rx: Option<mpsc::Receiver<(Vec<usize>, Vec<PathBuf>, PathBuf, String)>>,
@@ -263,6 +266,9 @@ impl Default for GUIApp {
             },
             backup_name_mode: config.backup_name_mode.clone(),
             overwrite_confirm: None,
+            conflict_rx: None,
+            conflict_answer_tx: None,
+            conflict_file: None,
             pending_backup: None,
             detecting_apps: false,
             detect_rx: None,
@@ -541,6 +547,41 @@ impl eframe::App for GUIApp {
                 ui.separator();
             }
 
+            // Poll restore conflict channel and show per-file prompt
+            if self.conflict_file.is_none() {
+                if let Some(path) = self.conflict_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
+                    self.conflict_file = Some(path);
+                }
+            }
+            if let Some(ref path) = self.conflict_file.clone() {
+                ui.separator();
+                ui.colored_label(egui::Color32::YELLOW, "⚠ File already exists at restore destination:");
+                ui.label(path.display().to_string());
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Overwrite").clicked() {
+                        if let Some(tx) = &self.conflict_answer_tx {
+                            let _ = tx.send(ConflictAnswer::Overwrite);
+                        }
+                        self.conflict_file = None;
+                    }
+                    if ui.button("Skip").clicked() {
+                        if let Some(tx) = &self.conflict_answer_tx {
+                            let _ = tx.send(ConflictAnswer::Skip);
+                        }
+                        self.conflict_file = None;
+                    }
+                    if ui.button("Rename").clicked() {
+                        if let Some(tx) = &self.conflict_answer_tx {
+                            let _ = tx.send(ConflictAnswer::Rename);
+                        }
+                        self.conflict_file = None;
+                    }
+                });
+                ui.separator();
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
+            }
+
             if self.template_editor {
                 ui.label("Editing Template");
 
@@ -648,10 +689,27 @@ impl eframe::App for GUIApp {
                     self.restore_progress = Some(progress.clone());
                     self.restore_opening = false;
                     let verbose = self.verbose_logging;
+                    let mode = if self.conflict_resolution_enabled {
+                        self.conflict_resolution_mode
+                    } else {
+                        ConflictResolutionMode::Overwrite
+                    };
+
+                    let conflict_ch = if mode == ConflictResolutionMode::Prompt {
+                        let (ctx, crx) = mpsc::channel::<PathBuf>();
+                        let (atx, arx) = mpsc::channel::<ConflictAnswer>();
+                        self.conflict_rx = Some(crx);
+                        self.conflict_answer_tx = Some(atx);
+                        Some((ctx, arx))
+                    } else {
+                        self.conflict_rx = None;
+                        self.conflict_answer_tx = None;
+                        None
+                    };
 
                     thread::spawn(move || {
                         if let Err(e) =
-                            restore_backup(&zip_path, Some(selected), status.clone(), &progress, verbose)
+                            restore_backup(&zip_path, Some(selected), status.clone(), &progress, verbose, mode, conflict_ch)
                         {
                             *status.lock().unwrap() = format!("❌ Restore failed: {e}");
                         }
@@ -1157,7 +1215,7 @@ impl eframe::App for GUIApp {
                         ui.set_width(ui.available_width());
                         ui.label(egui::RichText::new("Conflict Resolution").weak().small());
                         ui.add_space(2.0);
-                        ui.checkbox(&mut self.conflict_resolution_enabled, "Enable Conflict Resolution (WIP)");
+                        ui.checkbox(&mut self.conflict_resolution_enabled, "Enable Conflict Resolution");
                         if self.conflict_resolution_enabled {
                             egui::ComboBox::from_id_salt("conflict_mode")
                                 .selected_text(match self.conflict_resolution_mode {
