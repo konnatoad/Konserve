@@ -1,15 +1,4 @@
-﻿//! # Helpers Module
-//!
-//! Provides shared utilities for the app, including:
-//! - Persistent configuration handling (`KonserveConfig`)
-//! - Compression and conflict resolution enums
-//! - Progress tracking via atomic counters
-//! - Path adjustment and validation helpers
-//! - Tree rendering logic for the restore selection UI
-//! - Fingerprint parsing for verifying backup archives
-//! - Application icon loading
-//!
-//! This module acts as the core glue between backup/restore logic and the GUI.
+﻿//! Shared utilities — config, progress tracking, path helpers, tree rendering, and icon loading.
 use crate::FolderTreeNode;
 use eframe::egui;
 use eframe::egui::IconData;
@@ -29,6 +18,7 @@ use chrono::Local;
 use tar::Archive;
 
 static DEBUG_LOG: Mutex<Option<File>> = Mutex::new(None);
+static CRASH_LOG: Mutex<Option<File>> = Mutex::new(None);
 
 /// Returns the path of the verbose log file.
 pub fn verbose_log_path() -> PathBuf {
@@ -36,6 +26,43 @@ pub fn verbose_log_path() -> PathBuf {
         .parent()
         .unwrap_or(Path::new("."))
         .join("konserve.log")
+}
+
+/// Returns the path of the crash/error log file (next to the exe).
+pub fn crash_log_path() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("konserve-crash.log")))
+        .unwrap_or_else(|| PathBuf::from("konserve-crash.log"))
+}
+
+/// Opens (or creates) the crash log file next to the exe.
+/// Called once at startup — always on, no toggle.
+pub fn init_crash_log() {
+    let path = crash_log_path();
+    if let Ok(f) = OpenOptions::new().create(true).append(true).open(&path)
+        && let Ok(mut guard) = CRASH_LOG.lock()
+    {
+        *guard = Some(f);
+    }
+}
+
+/// Appends a timestamped error or crash message to the crash log.
+pub fn write_crash_log(msg: &str) {
+    let ts = Local::now().format("%Y-%m-%d %H:%M:%S");
+    if let Ok(mut guard) = CRASH_LOG.lock()
+        && let Some(ref mut f) = *guard
+    {
+        let _ = writeln!(f, "[{ts}] {msg}");
+        let _ = f.flush();
+    }
+}
+
+#[macro_export]
+macro_rules! clog {
+    ($($arg:tt)*) => {
+        $crate::helpers::write_crash_log(&format!($($arg)*))
+    }
 }
 
 /// Opens (and truncates) the verbose log file next to the config.
@@ -79,86 +106,31 @@ macro_rules! dlog {
     }
 }
 
-/// Persistent configuration object for Konserve.
-///
-/// Stores user preferences and feature toggles across application sessions.
-/// Automatically serialized/deserialized from a JSON file in the user's
-/// configuration directory.
-///
-/// - Path resolution favors `$XDG_CONFIG_HOME/konserve/config.json`.
-/// - If missing or invalid, defaults are used.
-///
-/// Fields map directly to Settings tab toggles in the GUI.
-#[derive(Serialize, Deserialize, Clone)]
+/// Persisted user settings, loaded from and saved to `konserve/config.json`.
+#[derive(Serialize, Deserialize, Clone, Default)]
 pub struct KonserveConfig {
-    /// Enables verbose debug logging when true.
     #[serde(default)]
     pub verbose_logging: bool,
-    /// Enables conflict resolution when restoring files.
     #[serde(default)]
     pub conflict_resolution_enabled: bool,
-    /// Strategy for handling name collisions during restore.
     #[serde(default)]
     pub conflict_resolution_mode: super::ConflictResolutionMode,
-    /// Optional default folder where backups will be saved.
     #[serde(default)]
     pub default_backup_location: Option<PathBuf>,
-    /// Whether to check for updates automatically on startup.
     #[serde(default)]
     pub automatic_updates: bool,
-    /// Show a summary of file sizes during backup/restore.
     #[serde(default)]
     pub file_size_summary: bool,
-    /// Save backups to the directory containing the exe instead of prompting.
     #[serde(default)]
     pub save_to_exe_dir: bool,
-    /// Controls how the backup filename is generated.
     #[serde(default)]
     pub backup_name_mode: BackupNameMode,
 }
 
-/// Provides default values for [`KonserveConfig`].
-///
-/// Called automatically when no saved config exists, or
-/// when [`KonserveConfig::load`] fails to parse the config file.
-/// Ensures the application always starts with a valid configuration.
-///
-/// # Defaults
-/// - `verbose_logging`: `false` — disables detailed debug logs
-/// - `conflict_resolution_enabled`: `false` — conflict resolution off
-/// - `conflict_resolution_mode`: [`ConflictResolutionMode::Prompt`] (default)
-/// - `default_backup_location`: `None` — user must select manually
-/// - `automatic_updates`: `false` — no automatic update checks
-/// - `file_size_summary`: `false` — skip size summaries during backups
-impl Default for KonserveConfig {
-    fn default() -> Self {
-        Self {
-            verbose_logging: false,
-            conflict_resolution_enabled: false,
-            conflict_resolution_mode: super::ConflictResolutionMode::default(),
-            default_backup_location: None,
-            automatic_updates: false,
-            file_size_summary: false,
-            save_to_exe_dir: false,
-            backup_name_mode: BackupNameMode::default(),
-        }
-    }
-}
+
 
 impl KonserveConfig {
-    /// Resolves the absolute path to the configuration file.
-    ///
-    /// Priority order for the base directory:
-    /// 1. `$XDG_CONFIG_HOME` (preferred)
-    /// 2. `$XDG_DATA_HOME` or equivalent data directory
-    /// 3. The user's home directory
-    /// 4. Current working directory (`.`) as a fallback
-    ///
-    /// The final path will always be:
-    /// `<base>/konserve/config.json`
-    ///
-    /// # Returns
-    /// A [`PathBuf`] pointing to the expected config file location.
+    /// Resolves `<config_dir>/konserve/config.json`, falling back to data dir, home, then `.`.
     fn config_path() -> PathBuf {
         let base = dirs::config_dir()
             .or_else(dirs::data_dir) // fallback
@@ -168,17 +140,7 @@ impl KonserveConfig {
         base.join("konserve").join("config.json")
     }
 
-    /// Loads the configuration from disk.
-    ///
-    /// - Attempts to read the JSON config file at [`Self::config_path`].
-    /// - If the file exists and deserializes correctly, returns the stored config.
-    /// - If missing or malformed, returns [`Self::default`].
-    ///
-    /// # Debug Output
-    /// Prints `[DEBUG] Loading config from <path>` when successful.
-    ///
-    /// # Returns
-    /// A [`KonserveConfig`] struct with either persisted values or defaults.
+    /// Load config from disk, falling back to defaults if missing or invalid.
     pub fn load() -> Self {
         let path = Self::config_path();
         if let Ok(data) = fs::read_to_string(&path)
@@ -189,19 +151,7 @@ impl KonserveConfig {
         Self::default()
     }
 
-    /// Saves the current configuration to disk.
-    ///
-    /// - Resolves the config path via [`Self::config_path`].
-    /// - Creates parent directories if missing.
-    /// - Serializes the configuration to pretty-printed JSON.
-    /// - Writes to the resolved file.
-    ///
-    /// # Errors
-    /// - If serialization fails, logs `[ERROR] Failed to serialize config`.
-    /// - If writing fails, logs `[ERROR] Failed to save config`.
-    ///
-    /// # Debug Output
-    /// Prints `[DEBUG] Saved config to <path>` on success.
+    /// Serialize and write the config to disk, creating parent dirs as needed.
     pub fn save(&self) {
         let path = Self::config_path();
         if let Some(dir) = path.parent() {
@@ -236,32 +186,17 @@ impl Default for BackupNameMode {
     }
 }
 
-/// Determines how name collisions are resolved during restore.
-///
-/// Used when a file to be restored already exists at the target path.
-///
-/// Variants:
-/// - `Prompt`: Ask the user for each conflict (default).
-/// - `Overwrite`: Replace the existing file.
-/// - `Skip`: Leave the existing file unchanged.
-/// - `Rename`: Write the restored file with a new name.
+/// How to handle a file that already exists at the restore destination.
 #[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Copy, Default)]
 pub enum ConflictResolutionMode {
     #[default]
-    Prompt, // Ask user
-    Overwrite, // Overwrite destination
-    Skip,      // Skip conflicting file
-    Rename,    // Rename on conflict
+    Prompt,
+    Overwrite,
+    Skip,
+    Rename,
 }
 
-/// Atomic counter for tracking progress percentages.
-///
-/// Shared across threads via `Arc`.
-/// Used to update the GUI progress bar in real-time.
-///
-/// - `set`: Updates progress to a given percentage (0–100).
-/// - `get`: Reads the current percentage.
-/// - `done`: Marks the operation as complete (101%).
+/// Thread-safe progress counter (0–100, or 101 when done).
 #[derive(Clone)]
 pub struct Progress {
     inner: Arc<AtomicU32>,
@@ -303,24 +238,30 @@ impl Default for Progress {
 /// An [`Arc<IconData>`] containing the icon.
 pub fn load_icon_image() -> Arc<IconData> {
     let image_bytes = include_bytes!("../assets/icon.png");
-    let image = image::load_from_memory(image_bytes)
-        .expect("Icon image couldn't be loaded")
-        .into_rgba8();
-    let (w, h) = image.dimensions();
+    let decoder = png::Decoder::new(std::io::Cursor::new(image_bytes));
+    let mut reader = decoder.read_info().expect("Icon PNG couldn't be read");
+    let mut buf = vec![0u8; reader.output_buffer_size().expect("Icon PNG buffer size unknown")];
+    let info = reader.next_frame(&mut buf).expect("Icon PNG frame error");
+    let bytes = &buf[..info.buffer_size()];
+
+    // Convert RGB to RGBA if needed
+    let rgba = match info.color_type {
+        png::ColorType::Rgba => bytes.to_vec(),
+        png::ColorType::Rgb => bytes
+            .chunks_exact(3)
+            .flat_map(|p| [p[0], p[1], p[2], 255])
+            .collect(),
+        _ => panic!("Unsupported icon color type"),
+    };
+
     Arc::new(IconData {
-        rgba: image.into_raw(),
-        width: w,
-        height: h,
+        rgba,
+        width: info.width,
+        height: info.height,
     })
 }
 
-/// Recursively toggles the checked state of a folder node and all its children.
-///
-/// Ensures that when a parent folder is selected/deselected,
-/// all contained files/folders update to match.
-///
-/// - `node`: The current tree node.
-/// - `checked`: Desired checkbox state.
+/// Recursively set the checked state of a node and all its children.
 fn set_all_checked(node: &mut FolderTreeNode, checked: bool, verbose: bool) {
     if verbose {
         dlog!(
@@ -335,14 +276,7 @@ fn set_all_checked(node: &mut FolderTreeNode, checked: bool, verbose: bool) {
     }
 }
 
-/// Renders a hierarchical folder/file tree in the restore selection UI.
-///
-/// Uses collapsible folders and checkboxes.
-/// Maintains parent-child sync when toggling.
-///
-/// - `ui`: egui UI handle for rendering.
-/// - `path`: Mutable path stack for recursion.
-/// - `node`: Current folder node to render.
+/// Render a collapsible checkbox tree for the restore selection UI.
 pub fn render_tree(ui: &mut egui::Ui, path: &mut Vec<String>, node: &mut FolderTreeNode, verbose: bool) {
     for (name, child) in node.children.iter_mut() {
         let mut label = name.clone();
@@ -387,15 +321,7 @@ pub fn render_tree(ui: &mut egui::Ui, path: &mut Vec<String>, node: &mut FolderT
     }
 }
 
-/// Constructs a user-friendly [`FolderTreeNode`] hierarchy from archive data.
-///
-/// Takes a list of tar entry paths and a UUID → original path map,
-/// then builds a tree that mirrors the original folder structure.
-///
-/// Used in the restore UI after parsing `fingerprint.txt`.
-///
-/// - `entries`: All archive file paths.
-/// - `path_map`: Maps UUIDs to original system paths.
+/// Build a human-readable restore tree from tar entries and the UUID → path map.
 pub fn build_human_tree(
     entries: Vec<String>,
     path_map: HashMap<String, PathBuf>,
@@ -479,8 +405,7 @@ pub fn build_human_tree(
     root
 }
 
-/// Recursively traverses a [`FolderTreeNode`] tree,
-/// collecting all checked file paths into a flat list.
+/// Recursively collect all checked file paths into a flat list.
 pub fn collect_recursive(node: &FolderTreeNode, path: &mut Vec<String>, output: &mut Vec<String>, verbose: bool) {
     for (name, child) in &node.children {
         path.push(name.clone());
@@ -495,9 +420,7 @@ pub fn collect_recursive(node: &FolderTreeNode, path: &mut Vec<String>, output: 
     }
 }
 
-/// Convenience wrapper around [`collect_recursive`].
-///
-/// Collects all checked paths from the root node.
+/// Collect all checked paths from the root node.
 pub fn collect_paths(root: &FolderTreeNode, verbose: bool) -> Vec<String> {
     if verbose { dlog!("[DEBUG] collect_paths: Start"); }
     let mut result = Vec::new();
@@ -507,14 +430,7 @@ pub fn collect_paths(root: &FolderTreeNode, verbose: bool) -> Vec<String> {
     result
 }
 
-/// Reads `fingerprint.txt` from a backup archive to rebuild UUID mappings.
-///
-/// Returns both:
-/// - `entries`: List of archive file paths excluding `fingerprint.txt`.
-/// - `path_map`: UUID → original path mappings for restoration.
-///
-/// # Errors
-/// Returns `Err` if the archive is invalid or fingerprint is missing.
+/// Read `fingerprint.txt` from an archive and return the entry list + UUID map.
 pub fn parse_fingerprint(
     zip_path: &PathBuf,
     verbose: bool,
@@ -576,11 +492,7 @@ pub fn parse_fingerprint(
     Ok((entries, path_map))
 }
 
-/// Returns the Konserve build fingerprint.
-///
-/// Used to verify that a backup was created by this build variant.
-/// Reads from `FINGERPRINT` environment variable at compile time.
-/// Defaults to `"DEFAULT_FINGERPRINT"` if not set.
+/// The build fingerprint embedded at compile time via the `FINGERPRINT` env var.
 pub fn get_fingered() -> &'static str {
     const DEFAULT: &str = "DEFAULT_FINGERPRINT";
     match option_env!("FINGERPRINT") {
@@ -589,16 +501,7 @@ pub fn get_fingered() -> &'static str {
     }
 }
 
-/// Adjusts a Windows-style path to match the current system's user home.
-///
-/// Example:
-/// - Original: `C:\Users\olduser\Documents\file.txt`
-/// - Adjusted: `C:\Users\currentuser\Documents\file.txt`
-///
-/// - `original`: Path stored in backup.
-/// - `current_home`: Current user's home directory.
-///
-/// Returns the adjusted path.
+/// Remap `C:\Users\<old>` to the current user's home directory if the prefix matches.
 pub fn adjust_path(original: &Path, current_home: &Path, verbose: bool) -> PathBuf {
     let og_str = original.to_string_lossy();
     let current_str = current_home.to_string_lossy();

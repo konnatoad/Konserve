@@ -1,19 +1,6 @@
-﻿//! # Backup Module
-//!
-//! Handles creation of `.tar` backup archives
-//!
-//! - Accepts a list of user-selected files and folders.
-//! - Packages them into a `.tar` archive (with optional compression planned).
-//! - Embeds a `fingerprint.txt` file that maps UUIDs to original paths,
-//!   ensuring that restores can accurately reconstruct file locations.
-//! - Tracks progress using the [`Progress`] helper
-//!   so the GUI can display live status updates.
-//!
-//! ## Notes
-//! - Current format is `.tar`. `.tar.gz` support is planned but not yet active.
-//! - Old `.zip` format is deprecated and left as commented legacy code.
+﻿//! Creates `.tar` backup archives with embedded `fingerprint.txt` path mappings.
 use crate::helpers::{Progress, get_fingered};
-use crate::dlog;
+use crate::{dlog, clog};
 use std::{
     fs::File,
     io,
@@ -26,48 +13,15 @@ use uuid::Uuid;
 use walkdir::WalkDir;
 
 
-/// Create a `.tar` backup archive of the given folders or files.
-///
-/// This function is used by the GUI to build a `.tar` archive
-/// from user-selected folders and files.  
-/// It embeds a `fingerprint.txt` metadata file inside the archive,
-/// which contains:
-/// - a unique identifier for the backup session
-/// - a mapping of randomly generated UUIDs to original paths
-///
-/// The backup progress is reported via a shared [`Progress`] counter,
-/// which allows the GUI to update a progress bar.
-///
-/// # Arguments
-/// - `folders`: A list of file or folder paths to include in the backup.
-/// - `output_dir`: The directory where the `.tar` archive should be created.
-/// - `progress`: A [`Progress`] instance used to report completion percentage.
-///
-/// # Returns
-/// - `Ok(PathBuf)` containing the path to the created `.tar` file on success.
-/// - `Err(String)` with an error message if the backup failed.
-///
-/// # Example
-/// ```rust,no_run
-/// use std::path::PathBuf;
-/// use konserve::helpers::Progress;
-/// use konserve::backup::backup_gui;
-///
-/// let folders = vec![PathBuf::from("Documents"), PathBuf::from("Pictures")];
-/// let output = PathBuf::from("Backups");
-/// let progress = Progress::default();
-///
-/// let result = backup_gui(&folders, &output, &progress);
-/// if let Ok(archive) = result {
-///     println!("Backup created at {}", archive.display());
-/// }
-/// ```
+/// Pack the given files/folders into a `.tar` archive with a `fingerprint.txt` inside.
+/// Returns the path to the created archive.
 pub fn backup_gui(
     folders: &[PathBuf],
     output_dir: &Path,
     filename: &str,
     progress: &Progress,
     verbose: bool,
+    skip_locked: bool,
 ) -> Result<PathBuf, String> {
     if verbose {
         dlog!("[DEBUG] backup_gui: Started");
@@ -77,7 +31,10 @@ pub fn backup_gui(
     let zip_path = output_dir.join(filename);
     if verbose { dlog!("[DEBUG] Creating backup archive: {}", zip_path.display()); }
 
-    let tar_file = File::create(&zip_path).map_err(|e| e.to_string())?;
+    let tar_file = File::create(&zip_path).map_err(|e| {
+        let msg = format!("ERROR: failed to create archive {}: {e}", zip_path.display());
+        clog!("{msg}"); msg
+    })?;
     let mut tar_builder = Builder::new(tar_file);
 
     // Start the fingerprint with identifier + info section
@@ -146,7 +103,19 @@ pub fn backup_gui(
             header.set_metadata(&metadata);
             header.set_cksum();
 
-            let mut f = File::open(original_path).map_err(|e| e.to_string())?;
+            let mut f = match File::open(original_path) {
+                Ok(f) => f,
+                Err(e) => {
+                    if skip_locked {
+                        dlog!("[WARN] Skipping inaccessible file {}: {e}", original_path.display());
+                        done += 1;
+                        progress.set(done * 100 / total_files);
+                        continue;
+                    }
+                    clog!("ERROR: cannot open file {}: {e}", original_path.display());
+                    return Err(e.to_string());
+                }
+            };
 
             let entry_name = match original_path.extension().and_then(|e| e.to_str()) {
                 Some(ext) => format!("{uuid}.{ext}"),
@@ -154,9 +123,16 @@ pub fn backup_gui(
             };
             if verbose { dlog!("[DEBUG] -> Entry name in tar: {entry_name}"); }
 
-            tar_builder
-                .append_data(&mut header, entry_name, &mut f)
-                .map_err(|e| e.to_string())?;
+            if let Err(e) = tar_builder.append_data(&mut header, entry_name, &mut f) {
+                if skip_locked {
+                    dlog!("[WARN] Skipping file {} (write error: {e})", original_path.display());
+                    done += 1;
+                    progress.set(done * 100 / total_files);
+                    continue;
+                }
+                clog!("ERROR: failed to write {} to archive: {e}", original_path.display());
+                return Err(e.to_string());
+            }
 
             done += 1;
             progress.set(done * 100 / total_files);
@@ -179,10 +155,29 @@ pub fn backup_gui(
 
             if metadata.is_file() {
                 if verbose { dlog!("[DEBUG] Adding file: {}", entry_path.display()); }
-                let mut file = File::open(entry_path).map_err(|e| e.to_string())?;
-                tar_builder
-                    .append_data(&mut header, tar_entry_path, &mut file)
-                    .map_err(|e| e.to_string())?;
+                let mut file = match File::open(entry_path) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        if skip_locked {
+                            dlog!("[WARN] Skipping inaccessible file {}: {e}", entry_path.display());
+                            done += 1;
+                            progress.set(done * 100 / total_files);
+                            continue;
+                        }
+                        clog!("ERROR: cannot open file {}: {e}", entry_path.display());
+                        return Err(e.to_string());
+                    }
+                };
+                if let Err(e) = tar_builder.append_data(&mut header, tar_entry_path, &mut file) {
+                    if skip_locked {
+                        dlog!("[WARN] Skipping file {} (write error: {e})", entry_path.display());
+                        done += 1;
+                        progress.set(done * 100 / total_files);
+                        continue;
+                    }
+                    clog!("ERROR: failed to write {} to archive: {e}", entry_path.display());
+                    return Err(e.to_string());
+                }
 
                 done += 1;
                 progress.set(done * 100 / total_files);
@@ -196,7 +191,10 @@ pub fn backup_gui(
     }
 
     // Finalize and flush .tar structure to disk
-    tar_builder.finish().map_err(|e| e.to_string())?;
+    tar_builder.finish().map_err(|e| {
+        let msg = format!("ERROR: failed to finalize archive {}: {e}", zip_path.display());
+        clog!("{msg}"); msg
+    })?;
     if verbose { dlog!("[DEBUG] Archive finished: {}", zip_path.display()); }
 
     progress.done();

@@ -1,27 +1,31 @@
 [package]
 name = "Konserve"
-version = "0.1.9"
+version = "0.1.10"
 edition = "2024"
 build = "build.rs"
 
 [dependencies]
-chrono = "0.4.41"
+chrono = "0.4.45"
 dirs = "6.0.0"
 eframe = "0.34.3"
 dotenv = "0.15.0"
-image = "0.25.6"
+png = "0.18"
 rfd = "0.17.2"
-serde = { version = "1.0.219", features = ["derive"] }
-serde_json = "1.0.140"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
 walkdir = "2.5.0"
-tar = "0.4.44"
-uuid = { version = "1.17.0", features = ["v4"] }
+tar = "0.4.46"
+uuid = { version = "1.23.4", features = ["v4"] }
 
 [build-dependencies]
-embed-resource = "3.0.3"
+embed-resource = "3.0.9"
 
 [profile.release]
 strip = true
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
 
 [profile.dev]
 panic = "unwind"

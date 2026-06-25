@@ -1,73 +1,93 @@
-﻿//! Restore module
-//!
-//! Handles extraction of `.tar` backups
-//!
-//! Validates the archive using fingerprint.txt
-//! Reconstructs file paths from UUID mappings
-//! Supports restoring either the entire backup or a subset chosen in the UI
-use crate::helpers::{Progress, adjust_path, get_fingered};
-use crate::dlog;
+﻿//! Extracts `.tar` backups, validates the fingerprint, and reconstructs original file paths.
+use crate::helpers::{ConflictResolutionMode, Progress, adjust_path, get_fingered};
+use crate::{dlog, clog};
 use std::{
     collections::{HashMap, HashSet},
     fs::{self, File},
     io::Read,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, mpsc},
 };
 use tar::Archive;
 
-/// Normalize a string path to a canonical form.
-///
-/// Converts Windows-style backslashes (`\`) into forward slashes (`/`)
-/// to make path comparison consistent across platforms.
-///
-/// # Arguments
-/// - `s`: Path-like string slice.
-///
-/// # Returns
-/// - A `String` with normalized separators.
-///
-/// # Example
-/// ```
-/// let p = canon("C:\\Users\\Jootu\\Documents");
-/// assert_eq!(p, "C:/Users/Jootu/Documents");
-/// ```
+/// Per-file answer sent from the UI back to a paused restore thread.
+pub enum ConflictAnswer {
+    Overwrite,
+    Skip,
+    Rename,
+}
+
+/// Return the path to write to, or `None` to skip the file.
+fn resolve_conflict(
+    dest: &Path,
+    mode: ConflictResolutionMode,
+    ch: &Option<(mpsc::Sender<PathBuf>, mpsc::Receiver<ConflictAnswer>)>,
+) -> Option<PathBuf> {
+    if !dest.exists() {
+        return Some(dest.to_path_buf());
+    }
+    match mode {
+        ConflictResolutionMode::Overwrite => Some(dest.to_path_buf()),
+        ConflictResolutionMode::Skip => None,
+        ConflictResolutionMode::Rename => Some(unique_path(dest)),
+        ConflictResolutionMode::Prompt => {
+            if let Some((tx, rx)) = ch {
+                if tx.send(dest.to_path_buf()).is_err() {
+                    return None;
+                }
+                match rx.recv() {
+                    Ok(ConflictAnswer::Overwrite) => Some(dest.to_path_buf()),
+                    Ok(ConflictAnswer::Skip) => None,
+                    Ok(ConflictAnswer::Rename) => Some(unique_path(dest)),
+                    Err(_) => None,
+                }
+            } else {
+                Some(dest.to_path_buf())
+            }
+        }
+    }
+}
+
+/// Append `_1`, `_2`, … before the extension until a free path is found.
+fn unique_path(dest: &Path) -> PathBuf {
+    let stem = dest.file_stem().unwrap_or_default().to_string_lossy();
+    let ext = dest
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    let parent = dest.parent().unwrap_or_else(|| Path::new(""));
+    let mut i = 1u32;
+    loop {
+        let candidate = parent.join(format!("{stem}_{i}{ext}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+        i += 1;
+    }
+}
+
+/// Normalize path separators to `/` for consistent comparison.
 fn canon<S: AsRef<str>>(s: S) -> String {
     s.as_ref().replace('\\', "/")
 }
 
-/// Restore files from a `.tar` backup archive.
-///
-/// Reads a `.tar` file created by [`backup_gui`](crate::backup::backup_gui),
-/// validates its fingerprint, and restores files to their original locations.
-/// Optionally, only a subset of files chosen by the user is restored.
-///
-/// # Arguments
-/// - `zip_path`: Path to the `.tar` archive.
-/// - `selected`: Optional list of human-readable file paths chosen by the user.
-///   If `None`, all files in the archive are restored.
-/// - `status`: Shared string for UI status updates.
-/// - `progress`: [`Progress`] counter to update GUI progress bars.
-///
-/// # Returns
-/// - `Ok(())` if the restore completed successfully.
-/// - `Err(String)` with an error message if restore failed.
-///
-/// # Notes
-/// - The function looks for a `fingerprint.txt` file inside the archive
-///   to validate the backup and reconstruct UUID mappings.
-/// - Paths are adapted to the current user's home directory where needed.
+/// Restore files from a `.tar` archive. If `selected` is provided, only those paths are restored.
 pub fn restore_backup(
     zip_path: &PathBuf,
     selected: Option<Vec<String>>,
     status: Arc<Mutex<String>>,
     progress: &Progress,
     verbose: bool,
+    mode: ConflictResolutionMode,
+    conflict_ch: Option<(mpsc::Sender<PathBuf>, mpsc::Receiver<ConflictAnswer>)>,
 ) -> Result<(), String> {
     *status.lock().unwrap() = "Restoring backup…".into();
 
     // Open archive and locate fingerprint
-    let mut archive = Archive::new(File::open(zip_path).map_err(|e| e.to_string())?);
+    let mut archive = Archive::new(File::open(zip_path).map_err(|e| {
+        let msg = format!("ERROR: cannot open archive {}: {e}", zip_path.display());
+        clog!("{msg}"); msg
+    })?);
     let mut path_map: HashMap<String, PathBuf> = HashMap::new();
     let mut valid_fingerprint = false;
 
@@ -96,6 +116,7 @@ pub fn restore_backup(
     }
 
     if !valid_fingerprint {
+        clog!("ERROR: restore aborted — invalid or missing backup fingerprint in {}", zip_path.display());
         return Err("Invalid backup fingerprint.".into());
     }
 
@@ -136,7 +157,10 @@ pub fn restore_backup(
 
     // Begin extraction
     let current_home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("C:\\"));
-    let mut archive = Archive::new(File::open(zip_path).map_err(|e| e.to_string())?);
+    let mut archive = Archive::new(File::open(zip_path).map_err(|e| {
+        let msg = format!("ERROR: cannot reopen archive for extraction {}: {e}", zip_path.display());
+        clog!("{msg}"); msg
+    })?);
 
     if verbose { dlog!("[extract] scanning archive…"); }
     let mut restored_count = 0;
@@ -181,11 +205,21 @@ pub fn restore_backup(
             let unpack_to = adjusted_base.join(rel);
             if verbose { dlog!("[write] dir {path_in_tar}  →  {}", unpack_to.display()); }
 
-            if let Some(dir) = unpack_to.parent() {
-                fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+            if let Some(final_path) = resolve_conflict(&unpack_to, mode, &conflict_ch) {
+                if let Some(dir) = final_path.parent() {
+                    fs::create_dir_all(dir).map_err(|e| {
+                        let msg = format!("ERROR: failed to create dir {}: {e}", dir.display());
+                        clog!("{msg}"); msg
+                    })?;
+                }
+                entry.unpack(&final_path).map_err(|e| {
+                    let msg = format!("ERROR: failed to unpack {} → {}: {e}", path_in_tar, final_path.display());
+                    clog!("{msg}"); msg
+                })?;
+                restored_count += 1;
+            } else {
+                if verbose { dlog!("[skip] conflict: {}", unpack_to.display()); }
             }
-            entry.unpack(&unpack_to).map_err(|e| e.to_string())?;
-            restored_count += 1;
             done += 1;
             progress.set((done * 100) / total_files);
         }
@@ -195,11 +229,21 @@ pub fn restore_backup(
                 let unpack_to = adjust_path(orig_file, &current_home, verbose);
                 if verbose { dlog!("[write] file {path_in_tar}  →  {}", unpack_to.display()); }
 
-                if let Some(dir) = unpack_to.parent() {
-                    fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+                if let Some(final_path) = resolve_conflict(&unpack_to, mode, &conflict_ch) {
+                    if let Some(dir) = final_path.parent() {
+                        fs::create_dir_all(dir).map_err(|e| {
+                            let msg = format!("ERROR: failed to create dir {}: {e}", dir.display());
+                            clog!("{msg}"); msg
+                        })?;
+                    }
+                    entry.unpack(&final_path).map_err(|e| {
+                        let msg = format!("ERROR: failed to unpack {} → {}: {e}", path_in_tar, final_path.display());
+                        clog!("{msg}"); msg
+                    })?;
+                    restored_count += 1;
+                } else {
+                    if verbose { dlog!("[skip] conflict: {}", unpack_to.display()); }
                 }
-                entry.unpack(&unpack_to).map_err(|e| e.to_string())?;
-                restored_count += 1;
                 done += 1;
                 progress.set((done * 100) / total_files);
             } else {

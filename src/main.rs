@@ -1,12 +1,4 @@
-//! # Konserve
-//!
-//! Konserve is a simple desktop backup and restore tool
-//!
-//! - Create `.tar` archives
-//! - Select files and folders manually via reusable templates.
-//! - Restore backups to their original destination with a tree view with selections
-//!
-//! Most settings related features are still work in progress.
+//! Konserve — simple desktop backup and restore tool.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod backup;
@@ -24,7 +16,8 @@ use helpers::load_icon_image;
 use helpers::parse_fingerprint;
 use helpers::render_tree;
 use helpers::verbose_log_path;
-use restore::restore_backup;
+use helpers::init_crash_log;
+use restore::{ConflictAnswer, restore_backup};
 
 use std::{
     collections::HashMap,
@@ -33,44 +26,60 @@ use std::{
     sync::{Arc, Mutex, mpsc},
     thread,
 };
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 use chrono::Local;
 use eframe::egui;
 use rfd::FileDialog;
 use serde::{Deserialize, Serialize};
 
-/// Type alias for messages exchanged during restore operations.
-///
-/// Used internally to communicate results of parsing a backup archive.
-///
-/// - On success: Contains a tuple of the root [`FolderTreeNode`] and the  original [`FolderTreeNode`] pointing to the `.tar` file.
-/// - On failure: Contains an error string describing why parsing failed
-type RestoreMsg = Result<(FolderTreeNode, PathBuf), String>; // Result type for restore operations
+/// A known app that may lock files during backup.
+struct KnownApp {
+    /// Display name shown in the prompt.
+    name: &'static str,
+    /// Process executable name to detect and kill.
+    process: &'static str,
+    /// Executable path to relaunch after backup (Windows only).
+    relaunch: Option<&'static str>,
+}
 
-/// Result of a background file dialog.
+const KNOWN_APPS: &[KnownApp] = &[
+    KnownApp { name: "Discord / Vesktop", process: "vesktop.exe",    relaunch: None },
+    KnownApp { name: "Discord",           process: "Discord.exe",    relaunch: None },
+    KnownApp { name: "Steam",             process: "steam.exe",      relaunch: Some("C:\\Program Files (x86)\\Steam\\steam.exe") },
+    KnownApp { name: "OBS Studio",        process: "obs64.exe",      relaunch: None },
+    KnownApp { name: "Zen Browser",       process: "zen.exe",        relaunch: None },
+    KnownApp { name: "Spotify",           process: "Spotify.exe",    relaunch: None },
+];
+
+/// Pending backup job waiting on the app-conflict prompt.
+struct PendingBackup {
+    folders: Vec<PathBuf>,
+    out_dir: PathBuf,
+    filename: String,
+    /// Apps that were detected as running.
+    detected: Vec<usize>, // indices into KNOWN_APPS
+}
+
+/// Result sent from the restore preview thread — tree + archive path on success, error string on failure.
+type RestoreMsg = Result<(FolderTreeNode, PathBuf), String>;
+
+/// Paths returned from a background file dialog.
 type FileDialogMsg = Vec<PathBuf>;
 
-/// A template representing a reusable set of file and folder paths.
-///
-/// Templates are serialized as JSON and can be saved/loaded by the user
-/// to quickly restore backup selections.
-///
-/// # Fields
-/// - `paths`: The list of filesystem paths that user selected to be part of a backup.
+/// Result from the background app-detection thread.
+type DetectResult = (Vec<usize>, Vec<PathBuf>, PathBuf, String);
+
+/// A saved set of paths that can be reloaded for future backups.
 #[derive(Serialize, Deserialize)]
 struct BackupTemplate {
     paths: Vec<PathBuf>,
 }
 
-/// A node in the restore/backup folder tree.
-///
-/// Each node may represent a file or folder.
-/// Used to build a checkbox tree UI for selecting what to back up or restore.
-///
-/// # Fields
-/// - `children`: A mapping of child names (file or folder) to their nodes.
-/// - `checked`: Whether this node is currently selected in the UI.
-/// - `is_file`: True if this node represents a file, false if a directory.
+/// One node in the restore tree — either a file or a folder with children.
 #[derive(Default)]
 struct FolderTreeNode {
     children: HashMap<String, FolderTreeNode>,
@@ -78,28 +87,7 @@ struct FolderTreeNode {
     is_file: bool,
 }
 
-/// Builds a hierarchical tree structure from a list of file system paths.
-///
-/// This function constructs a [`FolderTreeNode`] tree where each node
-/// represents a directory or file. It is used to display the contents
-/// of a backup archive in a checkbox tree, so users can select which
-/// files to restore.
-///
-/// # Arguments
-/// - `paths` – A slice of paths (as strings) that should be added to the tree.
-///
-/// # Returns
-/// - A [`FolderTreeNode`] representing the root of the constructed tree.
-///
-/// # Example
-/// ```
-/// let paths = vec![
-///     "Documents/report.docx".to_string(),
-///     "Pictures/vacation/photo1.jpg".to_string(),
-/// ];
-/// let tree = build_tree_from_paths(&paths);
-/// assert!(tree.children.contains_key("Documents"));
-/// ```
+/// Build a [`FolderTreeNode`] tree from a flat list of path strings.
 #[allow(dead_code)]
 fn build_tree_from_paths(paths: &[String]) -> FolderTreeNode {
     let mut root = FolderTreeNode::default();
@@ -128,40 +116,47 @@ fn build_tree_from_paths(paths: &[String]) -> FolderTreeNode {
 ///
 /// Returns an [`eframe::Error`] if the GUI fails to start.
 fn main() -> Result<(), eframe::Error> {
-    dotenv::dotenv().ok(); // Load environment variables from .env if available
+    dotenv::dotenv().ok();
 
-    let icon = load_icon_image(); // Load application image
+    init_crash_log();
+
+    // Catch panics and write them to the crash log before the process dies.
+    std::panic::set_hook(Box::new(|info| {
+        let msg = info.to_string();
+        helpers::write_crash_log(&format!("PANIC: {msg}"));
+        eprintln!("PANIC: {msg}");
+    }));
+
+    let icon = load_icon_image();
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([410.0, 450.0])
+            .with_inner_size([460.0, 600.0])
             .with_resizable(false)
             .with_icon(icon),
         ..Default::default()
     };
 
-    eframe::run_native(
+    let result = eframe::run_native(
         "Konserve",
         options,
         Box::new(|_cc| Ok(Box::new(GUIApp::default()))),
-    )
+    );
+
+    if let Err(ref e) = result {
+        helpers::write_crash_log(&format!("eframe error: {e}"));
+    }
+
+    result
 }
 
-/// Tabs available in the Konserve user interface.
-///
-/// Used for switching between different screens of the app.
 #[derive(PartialEq)]
 enum MainTab {
-    /// Main screen for selecting files/folders and performing backup/restore.
     Home,
-    /// Settings screen for configuring preferences such as conflict resolution.
     Settings,
 }
 
-/// Main application state
-///
-/// Holds user settings, selected backup paths, progress indicators,
-/// and the active tab. Implements [`eframe::App`] to render the GUI.
+/// All application state — settings, selected paths, progress, and active tab.
 struct GUIApp {
     status: Arc<Mutex<String>>,
     selected_folders: Vec<PathBuf>,
@@ -190,14 +185,15 @@ struct GUIApp {
     // temporary string buffer for the name input in settings
     backup_name_input: String,
     overwrite_confirm: Option<PathBuf>,
+    conflict_rx: Option<mpsc::Receiver<PathBuf>>,
+    conflict_answer_tx: Option<mpsc::Sender<ConflictAnswer>>,
+    conflict_file: Option<PathBuf>,
+    pending_backup: Option<PendingBackup>,
+    detecting_apps: bool,
+    detect_rx: Option<mpsc::Receiver<DetectResult>>,
     config: helpers::KonserveConfig,
 }
 
-/// Default initialization for [`GUIApp`].
-///
-/// Loads user configuration from [`helpers::KonserveConfig`],
-/// applies it to the struct fields, and sets sensible defaults
-/// for everything else (like "Waiting..." as the initial status).
 impl Default for GUIApp {
     fn default() -> Self {
         let config = helpers::KonserveConfig::load();
@@ -229,6 +225,12 @@ impl Default for GUIApp {
             },
             backup_name_mode: config.backup_name_mode.clone(),
             overwrite_confirm: None,
+            conflict_rx: None,
+            conflict_answer_tx: None,
+            conflict_file: None,
+            pending_backup: None,
+            detecting_apps: false,
+            detect_rx: None,
             config,
         };
         if app.verbose_logging {
@@ -238,21 +240,157 @@ impl Default for GUIApp {
     }
 }
 
-/// Implements the main event loop and UI rendering
-///
-/// - **Home tab**: Add folders/files, load or save templates, create backups, and restore from existing archives.
-/// - **Settings tab**: Configure various settings and preferences.
-/// - Handles template editing and restore selection views as modal sub-screens.
+impl GUIApp {
+    /// Spawn a background thread to detect conflicting apps, then kick off backup.
+    fn spawn_detect_and_backup(
+        &mut self,
+        folders: Vec<PathBuf>,
+        out_dir: PathBuf,
+        filename: String,
+    ) {
+        let (tx, rx) = mpsc::channel();
+        self.detect_rx = Some(rx);
+        self.detecting_apps = true;
+
+        thread::spawn(move || {
+            #[cfg(target_os = "windows")]
+            let detected = {
+                let output = std::process::Command::new("tasklist")
+                    .args(["/fo", "csv", "/nh"])
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .output();
+                match output {
+                    Ok(out) => {
+                        let list = String::from_utf8_lossy(&out.stdout).to_lowercase();
+                        KNOWN_APPS.iter().enumerate()
+                            .filter(|(_, app)| list.contains(&app.process.to_lowercase()))
+                            .map(|(i, _)| i)
+                            .collect::<Vec<_>>()
+                    }
+                    Err(_) => vec![],
+                }
+            };
+            #[cfg(not(target_os = "windows"))]
+            let detected: Vec<usize> = vec![];
+
+            let _ = tx.send((detected, folders, out_dir, filename));
+        });
+    }
+
+    /// Kill apps, wait for them to exit, then start backup — all in a background thread.
+    fn start_backup_after_kill(
+        &mut self,
+        folders: Vec<PathBuf>,
+        out_dir: PathBuf,
+        filename: String,
+        #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
+        processes: Vec<&'static str>,
+        relaunch: Vec<&'static str>,
+    ) {
+        let status = self.status.clone();
+        let progress = Progress::default();
+        self.backup_progress = Some(progress.clone());
+        let verbose = self.verbose_logging;
+
+        *status.lock().unwrap() = "Closing apps…".into();
+
+        std::thread::Builder::new()
+            .name("konserve-backup".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || {
+                #[cfg(target_os = "windows")]
+                // Collect exe paths before killing so we can relaunch afterward.
+                let discovered_relaunch: Vec<String> = {
+                    let mut paths = vec![];
+                    for proc in &processes {
+                        let out = std::process::Command::new("wmic")
+                            .args(["process", "where", &format!("name='{proc}'"), "get", "ExecutablePath", "/value"])
+                            .creation_flags(CREATE_NO_WINDOW)
+                            .output();
+                        if let Ok(out) = out {
+                            let text = String::from_utf8_lossy(&out.stdout);
+                            for line in text.lines() {
+                                if let Some(path) = line.strip_prefix("ExecutablePath=") {
+                                    let path = path.trim();
+                                    if !path.is_empty() {
+                                        paths.push(path.to_string());
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        let _ = std::process::Command::new("taskkill")
+                            .args(["/f", "/im", proc])
+                            .creation_flags(CREATE_NO_WINDOW)
+                            .output();
+                    }
+                    paths
+                };
+                #[cfg(not(target_os = "windows"))]
+                let discovered_relaunch: Vec<String> = vec![];
+                std::thread::sleep(std::time::Duration::from_millis(800));
+
+                *status.lock().unwrap() = "Packing into .tar".into();
+                match backup_gui(&folders, &out_dir, &filename, &progress, verbose, false) {
+                    Ok(path) => {
+                        *status.lock().unwrap() = format!("✅ Backup created:\n{}", path.display());
+                    }
+                    Err(e) => {
+                        clog!("ERROR: backup failed: {e}");
+                        *status.lock().unwrap() = format!("❌ Backup failed: {e}");
+                    }
+                }
+                for exe in &discovered_relaunch {
+                    let _ = std::process::Command::new(exe).spawn();
+                }
+                // Also relaunch any statically configured paths not already covered.
+                for exe in relaunch {
+                    if !discovered_relaunch.iter().any(|d| d.to_lowercase().contains(&exe.to_lowercase())) {
+                        let _ = std::process::Command::new(exe).spawn();
+                    }
+                }
+            })
+            .expect("failed to spawn backup thread");
+    }
+
+    /// Spawn the backup thread. Called after any app-conflict prompt is resolved.
+    fn start_backup(
+        &mut self,
+        folders: Vec<PathBuf>,
+        out_dir: PathBuf,
+        filename: String,
+        skip_locked: bool,
+        relaunch: Vec<&'static str>,
+    ) {
+        let status = self.status.clone();
+        let progress = Progress::default();
+        self.backup_progress = Some(progress.clone());
+        let verbose = self.verbose_logging;
+
+        *status.lock().unwrap() = "Packing into .tar".into();
+
+        std::thread::Builder::new()
+            .name("konserve-backup".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || {
+                match backup_gui(&folders, &out_dir, &filename, &progress, verbose, skip_locked) {
+                    Ok(path) => {
+                        *status.lock().unwrap() = format!("✅ Backup created:\n{}", path.display());
+                    }
+                    Err(e) => {
+                        clog!("ERROR: backup failed: {e}");
+                        *status.lock().unwrap() = format!("❌ Backup failed: {e}");
+                    }
+                }
+                for exe in relaunch {
+                    let _ = std::process::Command::new(exe).spawn();
+                }
+            })
+            .expect("failed to spawn backup thread");
+    }
+}
+
 impl eframe::App for GUIApp {
-    /// Main application update loop.
-    ///
-    /// Called every frame by `eframe`.
-    ///
-    /// Manages background backup/restore threads.
-    ///
-    /// # Parameters
-    /// - `ctx`: egui context used to render the UI.
-    /// - `_frame`: Frame handle (unused here).
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         egui::Frame::new()
             .inner_margin(egui::Margin::symmetric(8, 4))
@@ -269,6 +407,7 @@ impl eframe::App for GUIApp {
                     };
                     if ui.selectable_label(active, text).clicked() {
                         self.tab = tab;
+                        *self.status.lock().unwrap() = String::new();
                     }
                 }
             });
@@ -294,9 +433,12 @@ impl eframe::App for GUIApp {
                             .name("konserve-backup".into())
                             .stack_size(8 * 1024 * 1024)
                             .spawn(move || {
-                                match backup_gui(&folders, &out_dir, &filename, &progress, verbose) {
+                                match backup_gui(&folders, &out_dir, &filename, &progress, verbose, false) {
                                     Ok(path) => { *status.lock().unwrap() = format!("✅ Backup created:\n{}", path.display()); }
-                                    Err(e) => { *status.lock().unwrap() = format!("❌ Backup failed: {e}"); }
+                                    Err(e) => {
+                                        clog!("ERROR: backup failed: {e}");
+                                        *status.lock().unwrap() = format!("❌ Backup failed: {e}");
+                                    }
                                 }
                             })
                             .expect("failed to spawn backup thread");
@@ -307,6 +449,72 @@ impl eframe::App for GUIApp {
                     }
                 });
                 ui.separator();
+            }
+
+            // App-conflict prompt
+            if let Some(ref pending) = self.pending_backup {
+                ui.separator();
+                ui.colored_label(egui::Color32::YELLOW, "⚠ The following apps may be locking files:");
+                for &i in &pending.detected {
+                    ui.label(format!("  • {}", KNOWN_APPS[i].name));
+                }
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Close apps & backup").clicked() {
+                        let pending = self.pending_backup.take().unwrap();
+                        let processes: Vec<&'static str> = pending.detected.iter()
+                            .map(|&i| KNOWN_APPS[i].process)
+                            .collect();
+                        let relaunch: Vec<&'static str> = pending.detected.iter()
+                            .filter_map(|&i| KNOWN_APPS[i].relaunch)
+                            .collect();
+                        self.start_backup_after_kill(pending.folders, pending.out_dir, pending.filename, processes, relaunch);
+                    }
+                    if ui.button("Skip locked files").clicked() {
+                        let pending = self.pending_backup.take().unwrap();
+                        self.start_backup(pending.folders, pending.out_dir, pending.filename, true, vec![]);
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.pending_backup = None;
+                        *self.status.lock().unwrap() = "❌ Cancelled.".into();
+                    }
+                });
+                ui.separator();
+            }
+
+            // Poll restore conflict channel and show per-file prompt
+            if self.conflict_file.is_none()
+                && let Some(path) = self.conflict_rx.as_ref().and_then(|rx| rx.try_recv().ok())
+            {
+                self.conflict_file = Some(path);
+            }
+            if let Some(ref path) = self.conflict_file.clone() {
+                ui.separator();
+                ui.colored_label(egui::Color32::YELLOW, "⚠ File already exists at restore destination:");
+                ui.label(path.display().to_string());
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Overwrite").clicked() {
+                        if let Some(tx) = &self.conflict_answer_tx {
+                            let _ = tx.send(ConflictAnswer::Overwrite);
+                        }
+                        self.conflict_file = None;
+                    }
+                    if ui.button("Skip").clicked() {
+                        if let Some(tx) = &self.conflict_answer_tx {
+                            let _ = tx.send(ConflictAnswer::Skip);
+                        }
+                        self.conflict_file = None;
+                    }
+                    if ui.button("Rename").clicked() {
+                        if let Some(tx) = &self.conflict_answer_tx {
+                            let _ = tx.send(ConflictAnswer::Rename);
+                        }
+                        self.conflict_file = None;
+                    }
+                });
+                ui.separator();
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
             }
 
             if self.template_editor {
@@ -416,11 +624,29 @@ impl eframe::App for GUIApp {
                     self.restore_progress = Some(progress.clone());
                     self.restore_opening = false;
                     let verbose = self.verbose_logging;
+                    let mode = if self.conflict_resolution_enabled {
+                        self.conflict_resolution_mode
+                    } else {
+                        ConflictResolutionMode::Overwrite
+                    };
+
+                    let conflict_ch = if mode == ConflictResolutionMode::Prompt {
+                        let (ctx, crx) = mpsc::channel::<PathBuf>();
+                        let (atx, arx) = mpsc::channel::<ConflictAnswer>();
+                        self.conflict_rx = Some(crx);
+                        self.conflict_answer_tx = Some(atx);
+                        Some((ctx, arx))
+                    } else {
+                        self.conflict_rx = None;
+                        self.conflict_answer_tx = None;
+                        None
+                    };
 
                     thread::spawn(move || {
                         if let Err(e) =
-                            restore_backup(&zip_path, Some(selected), status.clone(), &progress, verbose)
+                            restore_backup(&zip_path, Some(selected), status.clone(), &progress, verbose, mode, conflict_ch)
                         {
+                            clog!("ERROR: restore failed: {e}");
                             *status.lock().unwrap() = format!("❌ Restore failed: {e}");
                         }
                     });
@@ -430,8 +656,10 @@ impl eframe::App for GUIApp {
 
                 if ui.button("Cancel").clicked() {
                     self.restore_editor = false;
+                    self.restore_opening = false;
                     self.restore_zip_path = None;
                     self.restore_tree = FolderTreeNode::default();
+                    *self.status.lock().unwrap() = String::new();
                 }
 
                 return;
@@ -439,6 +667,20 @@ impl eframe::App for GUIApp {
 
             match self.tab {
                 MainTab::Home => {
+                    // Poll detect-apps thread result
+                    if let Some((detected, folders, out_dir, filename)) =
+                        self.detect_rx.as_ref().and_then(|rx| rx.try_recv().ok())
+                    {
+                        self.detect_rx = None;
+                        self.detecting_apps = false;
+                        if detected.is_empty() {
+                            self.start_backup(folders, out_dir, filename, false, vec![]);
+                        } else {
+                            *self.status.lock().unwrap() = "Waiting…".into();
+                            self.pending_backup = Some(PendingBackup { folders, out_dir, filename, detected });
+                        }
+                    }
+
                     // Handle async result from restore preview thread
                     if let Some(finished_msg) =
                         self.restore_rx.as_ref().and_then(|rx| rx.try_recv().ok())
@@ -457,8 +699,11 @@ impl eframe::App for GUIApp {
                                 self.restore_tree = tree;
                                 self.restore_zip_path = Some(zip);
                                 self.restore_editor = true;
+                                self.restore_opening = false;
+                                *self.status.lock().unwrap() = String::new();
                             }
                             Err(e) => {
+                                clog!("ERROR: failed to open archive: {e}");
                                 *self.status.lock().unwrap() = format!("❌ Failed to open archive: {e}");
                             }
                         }
@@ -561,6 +806,14 @@ impl eframe::App for GUIApp {
                         });
                     }); // end picker frame
                     ui.add_space(2.0);
+
+                    if self.detecting_apps {
+                        ui.horizontal(|ui| {
+                            ui.add(egui::Spinner::new().size(12.0));
+                            ui.label("Checking for open apps…");
+                        });
+                        ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
+                    }
 
                     if self.file_dialog_opening {
                         ui.horizontal(|ui| {
@@ -735,26 +988,8 @@ impl eframe::App for GUIApp {
                                         return;
                                     }
 
-                                    *status.lock().unwrap() = "Packing into .tar".into();
-
-                                    let progress = Progress::default();
-                                    self.backup_progress = Some(progress.clone());
-                                    let verbose = self.verbose_logging;
-
-                                    std::thread::Builder::new()
-                                        .name("konserve-backup".into())
-                                        .stack_size(8 * 1024 * 1024)
-                                        .spawn(move || {
-                                            match backup_gui(&folders, &out_dir, &filename, &progress, verbose) {
-                                                Ok(path) => {
-                                                    *status.lock().unwrap() = format!("✅ Backup created:\n{}", path.display());
-                                                }
-                                                Err(e) => {
-                                                    *status.lock().unwrap() = format!("❌ Backup failed: {e}");
-                                                }
-                                            }
-                                        })
-                                        .expect("failed to spawn backup thread");
+                                    *status.lock().unwrap() = "Checking for open apps…".into();
+                                    self.spawn_detect_and_backup(folders, out_dir, filename);
     });
                             ui.add_sized(btn_size, egui::Button::new("Restore Backup"))
                                 .on_hover_text("⚠ Only restore archives you created yourself. Restoring untrusted archives can overwrite files on your system.")
@@ -917,7 +1152,7 @@ impl eframe::App for GUIApp {
                         ui.set_width(ui.available_width());
                         ui.label(egui::RichText::new("Conflict Resolution").weak().small());
                         ui.add_space(2.0);
-                        ui.checkbox(&mut self.conflict_resolution_enabled, "Enable Conflict Resolution (WIP)");
+                        ui.checkbox(&mut self.conflict_resolution_enabled, "Enable Conflict Resolution");
                         if self.conflict_resolution_enabled {
                             egui::ComboBox::from_id_salt("conflict_mode")
                                 .selected_text(match self.conflict_resolution_mode {
