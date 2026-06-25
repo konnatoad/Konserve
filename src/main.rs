@@ -318,22 +318,6 @@ impl GUIApp {
         });
     }
 
-    /// Kill a known app by process name and return its relaunch path if set.
-    fn kill_app(app: &KnownApp) {
-        #[cfg(target_os = "windows")]
-        let _ = std::process::Command::new("taskkill")
-            .args(["/f", "/im", app.process])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output();
-    }
-
-    /// Relaunch an app if it has a relaunch path configured.
-    fn relaunch_app(app: &KnownApp) {
-        if let Some(exe) = app.relaunch {
-            let _ = std::process::Command::new(exe).spawn();
-        }
-    }
-
     /// Kill apps, wait for them to exit, then start backup — all in a background thread.
     fn start_backup_after_kill(
         &mut self,
