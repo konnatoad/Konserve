@@ -303,14 +303,26 @@ impl Default for Progress {
 /// An [`Arc<IconData>`] containing the icon.
 pub fn load_icon_image() -> Arc<IconData> {
     let image_bytes = include_bytes!("../assets/icon.png");
-    let image = image::load_from_memory(image_bytes)
-        .expect("Icon image couldn't be loaded")
-        .into_rgba8();
-    let (w, h) = image.dimensions();
+    let decoder = png::Decoder::new(std::io::Cursor::new(image_bytes));
+    let mut reader = decoder.read_info().expect("Icon PNG couldn't be read");
+    let mut buf = vec![0u8; reader.output_buffer_size().expect("Icon PNG buffer size unknown")];
+    let info = reader.next_frame(&mut buf).expect("Icon PNG frame error");
+    let bytes = &buf[..info.buffer_size()];
+
+    // Convert RGB to RGBA if needed
+    let rgba = match info.color_type {
+        png::ColorType::Rgba => bytes.to_vec(),
+        png::ColorType::Rgb => bytes
+            .chunks_exact(3)
+            .flat_map(|p| [p[0], p[1], p[2], 255])
+            .collect(),
+        _ => panic!("Unsupported icon color type"),
+    };
+
     Arc::new(IconData {
-        rgba: image.into_raw(),
-        width: w,
-        height: h,
+        rgba,
+        width: info.width,
+        height: info.height,
     })
 }
 
