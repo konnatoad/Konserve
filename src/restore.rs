@@ -1,10 +1,4 @@
-﻿//! Restore module
-//!
-//! Handles extraction of `.tar` backups
-//!
-//! Validates the archive using fingerprint.txt
-//! Reconstructs file paths from UUID mappings
-//! Supports restoring either the entire backup or a subset chosen in the UI
+﻿//! Extracts `.tar` backups, validates the fingerprint, and reconstructs original file paths.
 use crate::helpers::{ConflictResolutionMode, Progress, adjust_path, get_fingered};
 use crate::{dlog, clog};
 use std::{
@@ -72,47 +66,12 @@ fn unique_path(dest: &Path) -> PathBuf {
     }
 }
 
-/// Normalize a string path to a canonical form.
-///
-/// Converts Windows-style backslashes (`\`) into forward slashes (`/`)
-/// to make path comparison consistent across platforms.
-///
-/// # Arguments
-/// - `s`: Path-like string slice.
-///
-/// # Returns
-/// - A `String` with normalized separators.
-///
-/// # Example
-/// ```
-/// let p = canon("C:\\Users\\Jootu\\Documents");
-/// assert_eq!(p, "C:/Users/Jootu/Documents");
-/// ```
+/// Normalize path separators to `/` for consistent comparison.
 fn canon<S: AsRef<str>>(s: S) -> String {
     s.as_ref().replace('\\', "/")
 }
 
-/// Restore files from a `.tar` backup archive.
-///
-/// Reads a `.tar` file created by [`backup_gui`](crate::backup::backup_gui),
-/// validates its fingerprint, and restores files to their original locations.
-/// Optionally, only a subset of files chosen by the user is restored.
-///
-/// # Arguments
-/// - `zip_path`: Path to the `.tar` archive.
-/// - `selected`: Optional list of human-readable file paths chosen by the user.
-///   If `None`, all files in the archive are restored.
-/// - `status`: Shared string for UI status updates.
-/// - `progress`: [`Progress`] counter to update GUI progress bars.
-///
-/// # Returns
-/// - `Ok(())` if the restore completed successfully.
-/// - `Err(String)` with an error message if restore failed.
-///
-/// # Notes
-/// - The function looks for a `fingerprint.txt` file inside the archive
-///   to validate the backup and reconstruct UUID mappings.
-/// - Paths are adapted to the current user's home directory where needed.
+/// Restore files from a `.tar` archive. If `selected` is provided, only those paths are restored.
 pub fn restore_backup(
     zip_path: &PathBuf,
     selected: Option<Vec<String>>,

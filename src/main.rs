@@ -1,12 +1,4 @@
-//! # Konserve
-//!
-//! Konserve is a simple desktop backup and restore tool
-//!
-//! - Create `.tar` archives
-//! - Select files and folders manually via reusable templates.
-//! - Restore backups to their original destination with a tree view with selections
-//!
-//! Most settings related features are still work in progress.
+//! Konserve — simple desktop backup and restore tool.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod backup;
@@ -71,38 +63,19 @@ struct PendingBackup {
     detected: Vec<usize>, // indices into KNOWN_APPS
 }
 
-/// Type alias for messages exchanged during restore operations.
-///
-/// Used internally to communicate results of parsing a backup archive.
-///
-/// - On success: Contains a tuple of the root [`FolderTreeNode`] and the  original [`FolderTreeNode`] pointing to the `.tar` file.
-/// - On failure: Contains an error string describing why parsing failed
-type RestoreMsg = Result<(FolderTreeNode, PathBuf), String>; // Result type for restore operations
+/// Result sent from the restore preview thread — tree + archive path on success, error string on failure.
+type RestoreMsg = Result<(FolderTreeNode, PathBuf), String>;
 
-/// Result of a background file dialog.
+/// Paths returned from a background file dialog.
 type FileDialogMsg = Vec<PathBuf>;
 
-/// A template representing a reusable set of file and folder paths.
-///
-/// Templates are serialized as JSON and can be saved/loaded by the user
-/// to quickly restore backup selections.
-///
-/// # Fields
-/// - `paths`: The list of filesystem paths that user selected to be part of a backup.
+/// A saved set of paths that can be reloaded for future backups.
 #[derive(Serialize, Deserialize)]
 struct BackupTemplate {
     paths: Vec<PathBuf>,
 }
 
-/// A node in the restore/backup folder tree.
-///
-/// Each node may represent a file or folder.
-/// Used to build a checkbox tree UI for selecting what to back up or restore.
-///
-/// # Fields
-/// - `children`: A mapping of child names (file or folder) to their nodes.
-/// - `checked`: Whether this node is currently selected in the UI.
-/// - `is_file`: True if this node represents a file, false if a directory.
+/// One node in the restore tree — either a file or a folder with children.
 #[derive(Default)]
 struct FolderTreeNode {
     children: HashMap<String, FolderTreeNode>,
@@ -110,28 +83,7 @@ struct FolderTreeNode {
     is_file: bool,
 }
 
-/// Builds a hierarchical tree structure from a list of file system paths.
-///
-/// This function constructs a [`FolderTreeNode`] tree where each node
-/// represents a directory or file. It is used to display the contents
-/// of a backup archive in a checkbox tree, so users can select which
-/// files to restore.
-///
-/// # Arguments
-/// - `paths` – A slice of paths (as strings) that should be added to the tree.
-///
-/// # Returns
-/// - A [`FolderTreeNode`] representing the root of the constructed tree.
-///
-/// # Example
-/// ```
-/// let paths = vec![
-///     "Documents/report.docx".to_string(),
-///     "Pictures/vacation/photo1.jpg".to_string(),
-/// ];
-/// let tree = build_tree_from_paths(&paths);
-/// assert!(tree.children.contains_key("Documents"));
-/// ```
+/// Build a [`FolderTreeNode`] tree from a flat list of path strings.
 #[allow(dead_code)]
 fn build_tree_from_paths(paths: &[String]) -> FolderTreeNode {
     let mut root = FolderTreeNode::default();
@@ -194,21 +146,13 @@ fn main() -> Result<(), eframe::Error> {
     result
 }
 
-/// Tabs available in the Konserve user interface.
-///
-/// Used for switching between different screens of the app.
 #[derive(PartialEq)]
 enum MainTab {
-    /// Main screen for selecting files/folders and performing backup/restore.
     Home,
-    /// Settings screen for configuring preferences such as conflict resolution.
     Settings,
 }
 
-/// Main application state
-///
-/// Holds user settings, selected backup paths, progress indicators,
-/// and the active tab. Implements [`eframe::App`] to render the GUI.
+/// All application state — settings, selected paths, progress, and active tab.
 struct GUIApp {
     status: Arc<Mutex<String>>,
     selected_folders: Vec<PathBuf>,
@@ -246,11 +190,6 @@ struct GUIApp {
     config: helpers::KonserveConfig,
 }
 
-/// Default initialization for [`GUIApp`].
-///
-/// Loads user configuration from [`helpers::KonserveConfig`],
-/// applies it to the struct fields, and sets sensible defaults
-/// for everything else (like "Waiting..." as the initial status).
 impl Default for GUIApp {
     fn default() -> Self {
         let config = helpers::KonserveConfig::load();
@@ -446,21 +385,7 @@ impl GUIApp {
     }
 }
 
-/// Implements the main event loop and UI rendering
-///
-/// - **Home tab**: Add folders/files, load or save templates, create backups, and restore from existing archives.
-/// - **Settings tab**: Configure various settings and preferences.
-/// - Handles template editing and restore selection views as modal sub-screens.
 impl eframe::App for GUIApp {
-    /// Main application update loop.
-    ///
-    /// Called every frame by `eframe`.
-    ///
-    /// Manages background backup/restore threads.
-    ///
-    /// # Parameters
-    /// - `ctx`: egui context used to render the UI.
-    /// - `_frame`: Frame handle (unused here).
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         egui::Frame::new()
             .inner_margin(egui::Margin::symmetric(8, 4))
