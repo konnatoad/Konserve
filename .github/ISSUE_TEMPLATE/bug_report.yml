@@ -1,0 +1,72 @@
+name: Bug Report
+description: something broke? tell me about it
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: checkboxes
+    attributes:
+      label: before you post
+      options:
+        - label: i checked and there's no existing issue for this
+          required: true
+        - label: i'm on the latest release
+          required: true
+
+  - type: dropdown
+    attributes:
+      label: what OS are you on
+      options:
+        - Windows
+        - Linux
+    validations:
+      required: true
+
+  - type: dropdown
+    attributes:
+      label: which distro
+      description: skip if you're on windows
+      options:
+        - Arch Linux
+        - CachyOS
+        - Debian
+        - EndeavourOS
+        - Fedora
+        - Garuda Linux
+        - Gentoo
+        - KDE Neon
+        - Linux Mint
+        - Manjaro
+        - Nobara
+        - OpenSUSE
+        - Pop!_OS
+        - Ubuntu
+        - Void Linux
+        - Zorin OS
+        - other (just write it below)
+    validations:
+      required: false
+
+  - type: textarea
+    attributes:
+      label: what's the bug
+      description: describe what's going wrong. screenshots help a lot
+    validations:
+      required: true
+
+  - type: textarea
+    attributes:
+      label: how do i reproduce it
+      placeholder: |
+        1. open konserve
+        2. add a folder
+        3. click create backup
+        4. it breaks
+    validations:
+      required: true
+
+  - type: textarea
+    attributes:
+      label: anything else
+      description: logs, crash reports, whatever. drag files in here if you have them
+    validations:
+      required: false
