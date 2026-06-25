@@ -107,7 +107,7 @@ macro_rules! dlog {
 }
 
 /// Persisted user settings, loaded from and saved to `konserve/config.json`.
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Default)]
 pub struct KonserveConfig {
     #[serde(default)]
     pub verbose_logging: bool,
@@ -127,20 +127,7 @@ pub struct KonserveConfig {
     pub backup_name_mode: BackupNameMode,
 }
 
-impl Default for KonserveConfig {
-    fn default() -> Self {
-        Self {
-            verbose_logging: false,
-            conflict_resolution_enabled: false,
-            conflict_resolution_mode: super::ConflictResolutionMode::default(),
-            default_backup_location: None,
-            automatic_updates: false,
-            file_size_summary: false,
-            save_to_exe_dir: false,
-            backup_name_mode: BackupNameMode::default(),
-        }
-    }
-}
+
 
 impl KonserveConfig {
     /// Resolves `<config_dir>/konserve/config.json`, falling back to data dir, home, then `.`.
