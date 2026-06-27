@@ -26,10 +26,10 @@ use std::{
     sync::{Arc, Mutex, mpsc},
     thread,
 };
-#[cfg(target_os = "windows")]
-use std::os::windows::process::CommandExt;
-#[cfg(target_os = "windows")]
-const CREATE_NO_WINDOW: u32 = 0x08000000;
+//#[cfg(target_os = "windows")]
+//use std::os::windows::process::CommandExt;
+//#[cfg(target_os = "windows")]
+//const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 use chrono::Local;
 use eframe::egui;
@@ -42,26 +42,32 @@ struct KnownApp {
     name: &'static str,
     /// Process executable name to detect and kill.
     process: &'static str,
-    /// Executable path to relaunch after backup (Windows only).
-    relaunch: Option<&'static str>,
 }
 
 const KNOWN_APPS: &[KnownApp] = &[
-    KnownApp { name: "Discord / Vesktop", process: "vesktop.exe",    relaunch: None },
-    KnownApp { name: "Discord",           process: "Discord.exe",    relaunch: None },
-    KnownApp { name: "Steam",             process: "steam.exe",      relaunch: Some("C:\\Program Files (x86)\\Steam\\steam.exe") },
-    KnownApp { name: "OBS Studio",        process: "obs64.exe",      relaunch: None },
-    KnownApp { name: "Zen Browser",       process: "zen.exe",        relaunch: None },
-    KnownApp { name: "Spotify",           process: "Spotify.exe",    relaunch: None },
+    KnownApp { name: "Discord / Vesktop", process: "vesktop.exe"},
+    KnownApp { name: "Discord",           process: "Discord.exe"},
+    KnownApp { name: "Steam",             process: "steam.exe"},
+    KnownApp { name: "OBS Studio",        process: "obs64.exe"},
+    KnownApp { name: "Zen Browser",       process: "zen.exe"},
+    KnownApp { name: "Spotify",           process: "Spotify.exe"},
+    KnownApp { name: "ShareX",            process: "ShareX.exe"},
 ];
+
+struct ClosedApp {
+    /// Display name shown in the prompt.
+    name: &'static str,
+    /// Executable path to relaunch after backup (Windows only).
+    exe_path: Option<PathBuf>,
+}
 
 /// Pending backup job waiting on the app-conflict prompt.
 struct PendingBackup {
     folders: Vec<PathBuf>,
     out_dir: PathBuf,
     filename: String,
-    /// Apps that were detected as running.
-    detected: Vec<usize>, // indices into KNOWN_APPS
+    /// Apps detected as running: (index into KNOWN_APPS, captured exe path).
+    detected: Vec<(usize, Option<PathBuf>)>,
 }
 
 /// Result sent from the restore preview thread — tree + archive path on success, error string on failure.
@@ -71,7 +77,7 @@ type RestoreMsg = Result<(FolderTreeNode, PathBuf), String>;
 type FileDialogMsg = Vec<PathBuf>;
 
 /// Result from the background app-detection thread.
-type DetectResult = (Vec<usize>, Vec<PathBuf>, PathBuf, String);
+type DetectResult = (Vec<(usize, Option<PathBuf>)>, Vec<PathBuf>, PathBuf, String);
 
 /// A saved set of paths that can be reloaded for future backups.
 #[derive(Serialize, Deserialize)]
@@ -191,6 +197,9 @@ struct GUIApp {
     pending_backup: Option<PendingBackup>,
     detecting_apps: bool,
     detect_rx: Option<mpsc::Receiver<DetectResult>>,
+    closed_apps: Vec<ClosedApp>,
+    relaunch_prompt: bool,
+    relaunch_rx: Option<mpsc::Receiver<Vec<ClosedApp>>>,
     config: helpers::KonserveConfig,
 }
 
@@ -231,6 +240,9 @@ impl Default for GUIApp {
             pending_backup: None,
             detecting_apps: false,
             detect_rx: None,
+            closed_apps: Vec::new(),
+            relaunch_prompt: false,
+            relaunch_rx: None,
             config,
         };
         if app.verbose_logging {
@@ -253,25 +265,9 @@ impl GUIApp {
         self.detecting_apps = true;
 
         thread::spawn(move || {
-            #[cfg(target_os = "windows")]
-            let detected = {
-                let output = std::process::Command::new("tasklist")
-                    .args(["/fo", "csv", "/nh"])
-                    .creation_flags(CREATE_NO_WINDOW)
-                    .output();
-                match output {
-                    Ok(out) => {
-                        let list = String::from_utf8_lossy(&out.stdout).to_lowercase();
-                        KNOWN_APPS.iter().enumerate()
-                            .filter(|(_, app)| list.contains(&app.process.to_lowercase()))
-                            .map(|(i, _)| i)
-                            .collect::<Vec<_>>()
-                    }
-                    Err(_) => vec![],
-                }
-            };
-            #[cfg(not(target_os = "windows"))]
-            let detected: Vec<usize> = vec![];
+            let process_names: Vec<&'static str> =
+                KNOWN_APPS.iter().map(|a| a.process).collect();
+            let detected = helpers::detect_known_processes(&process_names);
 
             let _ = tx.send((detected, folders, out_dir, filename));
         });
@@ -283,9 +279,7 @@ impl GUIApp {
         folders: Vec<PathBuf>,
         out_dir: PathBuf,
         filename: String,
-        #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
-        processes: Vec<&'static str>,
-        relaunch: Vec<&'static str>,
+        apps: Vec<ClosedApp>,
     ) {
         let status = self.status.clone();
         let progress = Progress::default();
@@ -294,40 +288,21 @@ impl GUIApp {
 
         *status.lock().unwrap() = "Closing apps…".into();
 
+        let process_names: Vec<&'static str> = apps
+            .iter()
+            .filter_map(|a| KNOWN_APPS.iter().find(|k| k.name == a.name).map(|k| k.process))
+            .collect();
+
+        let (done_tx, done_rx) = mpsc::channel::<Vec<ClosedApp>>();
+        self.relaunch_rx = Some(done_rx);
+
         std::thread::Builder::new()
             .name("konserve-backup".into())
             .stack_size(8 * 1024 * 1024)
             .spawn(move || {
-                #[cfg(target_os = "windows")]
-                // Collect exe paths before killing so we can relaunch afterward.
-                let discovered_relaunch: Vec<String> = {
-                    let mut paths = vec![];
-                    for proc in &processes {
-                        let out = std::process::Command::new("wmic")
-                            .args(["process", "where", &format!("name='{proc}'"), "get", "ExecutablePath", "/value"])
-                            .creation_flags(CREATE_NO_WINDOW)
-                            .output();
-                        if let Ok(out) = out {
-                            let text = String::from_utf8_lossy(&out.stdout);
-                            for line in text.lines() {
-                                if let Some(path) = line.strip_prefix("ExecutablePath=") {
-                                    let path = path.trim();
-                                    if !path.is_empty() {
-                                        paths.push(path.to_string());
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                        let _ = std::process::Command::new("taskkill")
-                            .args(["/f", "/im", proc])
-                            .creation_flags(CREATE_NO_WINDOW)
-                            .output();
-                    }
-                    paths
-                };
-                #[cfg(not(target_os = "windows"))]
-                let discovered_relaunch: Vec<String> = vec![];
+                for proc in &process_names {
+                    helpers::kill_process(proc);
+                }
                 std::thread::sleep(std::time::Duration::from_millis(800));
 
                 *status.lock().unwrap() = "Packing into .tar".into();
@@ -340,15 +315,8 @@ impl GUIApp {
                         *status.lock().unwrap() = format!("❌ Backup failed: {e}");
                     }
                 }
-                for exe in &discovered_relaunch {
-                    let _ = std::process::Command::new(exe).spawn();
-                }
-                // Also relaunch any statically configured paths not already covered.
-                for exe in relaunch {
-                    if !discovered_relaunch.iter().any(|d| d.to_lowercase().contains(&exe.to_lowercase())) {
-                        let _ = std::process::Command::new(exe).spawn();
-                    }
-                }
+
+                let _ = done_tx.send(apps);
             })
             .expect("failed to spawn backup thread");
     }
@@ -455,20 +423,20 @@ impl eframe::App for GUIApp {
             if let Some(ref pending) = self.pending_backup {
                 ui.separator();
                 ui.colored_label(egui::Color32::YELLOW, "⚠ The following apps may be locking files:");
-                for &i in &pending.detected {
+                for &(i, _) in &pending.detected {
                     ui.label(format!("  • {}", KNOWN_APPS[i].name));
                 }
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     if ui.button("Close apps & backup").clicked() {
                         let pending = self.pending_backup.take().unwrap();
-                        let processes: Vec<&'static str> = pending.detected.iter()
-                            .map(|&i| KNOWN_APPS[i].process)
+                        let apps: Vec<ClosedApp> = pending.detected.iter()
+                            .map(|&(i, ref path)| ClosedApp {
+                                name: KNOWN_APPS[i].name,
+                                exe_path: path.clone(),
+                            })
                             .collect();
-                        let relaunch: Vec<&'static str> = pending.detected.iter()
-                            .filter_map(|&i| KNOWN_APPS[i].relaunch)
-                            .collect();
-                        self.start_backup_after_kill(pending.folders, pending.out_dir, pending.filename, processes, relaunch);
+                        self.start_backup_after_kill(pending.folders, pending.out_dir, pending.filename, apps);
                     }
                     if ui.button("Skip locked files").clicked() {
                         let pending = self.pending_backup.take().unwrap();
@@ -477,6 +445,32 @@ impl eframe::App for GUIApp {
                     if ui.button("Cancel").clicked() {
                         self.pending_backup = None;
                         *self.status.lock().unwrap() = "❌ Cancelled.".into();
+                    }
+                });
+                ui.separator();
+            }
+
+            if self.relaunch_prompt {
+                ui.separator();
+                ui.colored_label(egui::Color32::LIGHT_BLUE, "Backup finished. Relaunch apps?");
+                for app in &self.closed_apps {
+                    let note = if app.exe_path.is_some() { "" } else { " (failed to relaunch apps)" };
+                    ui.label(format!("  • {}{}", app.name, note));
+                }
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    if ui.button("yes").clicked() {
+                        for app in &self.closed_apps {
+                            if let Some(path) = &app.exe_path {
+                                let _ = std::process::Command::new(path).spawn();
+                            }
+                        }
+                        self.closed_apps.clear();
+                        self.relaunch_prompt = false;
+                    }
+                    if ui.button("no").clicked() {
+                        self.closed_apps.clear();
+                        self.relaunch_prompt = false;
                     }
                 });
                 ui.separator();
@@ -679,6 +673,12 @@ impl eframe::App for GUIApp {
                             *self.status.lock().unwrap() = "Waiting…".into();
                             self.pending_backup = Some(PendingBackup { folders, out_dir, filename, detected });
                         }
+                    }
+
+                    if let Some(apps) = self.relaunch_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
+                        self.relaunch_rx = None;
+                        self.closed_apps = apps;
+                        self.relaunch_prompt = !self.closed_apps.is_empty();
                     }
 
                     // Handle async result from restore preview thread

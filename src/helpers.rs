@@ -5,11 +5,7 @@ use eframe::egui::IconData;
 use egui::CollapsingHeader;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
-    fs::{self, File, OpenOptions},
-    io::{Read, Write},
-    path::{Path, PathBuf},
-    sync::{
+    collections::HashMap, fs::{self, File, OpenOptions}, io::{Read, Write}, path::{Path, PathBuf}, sync::{
         Arc, Mutex,
         atomic::{AtomicU32, Ordering},
     },
@@ -542,3 +538,61 @@ pub fn fix_skip(path: &Path, verbose: bool) -> Option<PathBuf> {
     }
 }
 
+#[cfg(target_os = "windows")]
+pub fn detect_known_processes(process_names: &[&str]) -> Vec<(usize, Option<PathBuf>)> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    let names_arg = process_names
+        .iter()
+        .map(|n| format!("'{}'", n.trim_end_matches(".exe")))
+        .collect::<Vec<_>>()
+        .join(",");
+
+    let script = format!(
+        "Get-Process -Name {names_arg} -ErrorAction SilentlyContinue | \
+         ForEach-Object {{ \"$($_.ProcessName)|$($_.Path)\" }}"
+    );
+
+    let output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+
+    let mut found = Vec::new();
+    let Ok(output) = output else { return found };
+    let text = String::from_utf8_lossy(&output.stdout);
+
+    for line in text.lines() {
+        let Some((name, path)) = line.split_once('|') else { continue };
+        let name = name.trim();
+        let path = path.trim();
+
+        for (i, proc_name) in process_names.iter().enumerate() {
+            if proc_name.trim_end_matches(".exe").eq_ignore_ascii_case(name) {
+                let exe_path = if path.is_empty() { None } else { Some(PathBuf::from(path)) };
+                found.push((i, exe_path));
+                break;
+            }
+        }
+    }
+    found
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn detect_known_processes(_process_names: &[&str]) -> Vec<(usize, Option<PathBuf>)> {
+    Vec::new()
+}
+
+#[cfg(target_os = "windows")]
+pub fn kill_process(process_name: &str) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    let _ = std::process::Command::new("taskkill")
+    .args(["/f", "/im", process_name])
+    .creation_flags(CREATE_NO_WINDOW)
+    .output();
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn kill_processes(_process_name: &str) {}
