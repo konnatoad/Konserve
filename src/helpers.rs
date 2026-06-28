@@ -126,9 +126,9 @@ pub struct KonserveConfig {
 impl KonserveConfig {
     /// Resolves `<config_dir>/konserve/config.json`, falling back to data dir, home, then `.`.
     fn config_path() -> PathBuf {
-        let base = dirs::config_dir()
-            .or_else(dirs::data_dir) // fallback
-            .or_else(dirs::home_dir)
+        let base = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
             .unwrap_or(PathBuf::from("."));
 
         base.join("konserve").join("config.json")
