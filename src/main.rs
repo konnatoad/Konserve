@@ -328,7 +328,6 @@ impl GUIApp {
         out_dir: PathBuf,
         filename: String,
         skip_locked: bool,
-        relaunch: Vec<&'static str>,
     ) {
         let status = self.status.clone();
         let progress = Progress::default();
@@ -349,9 +348,6 @@ impl GUIApp {
                         clog!("ERROR: backup failed: {e}");
                         *status.lock().unwrap() = format!("❌ Backup failed: {e}");
                     }
-                }
-                for exe in relaunch {
-                    let _ = std::process::Command::new(exe).spawn();
                 }
             })
             .expect("failed to spawn backup thread");
@@ -440,7 +436,7 @@ impl eframe::App for GUIApp {
                     }
                     if ui.button("Skip locked files").clicked() {
                         let pending = self.pending_backup.take().unwrap();
-                        self.start_backup(pending.folders, pending.out_dir, pending.filename, true, vec![]);
+                        self.start_backup(pending.folders, pending.out_dir, pending.filename, true);
                     }
                     if ui.button("Cancel").clicked() {
                         self.pending_backup = None;
@@ -668,7 +664,7 @@ impl eframe::App for GUIApp {
                         self.detect_rx = None;
                         self.detecting_apps = false;
                         if detected.is_empty() {
-                            self.start_backup(folders, out_dir, filename, false, vec![]);
+                            self.start_backup(folders, out_dir, filename, false);
                         } else {
                             *self.status.lock().unwrap() = "Waiting…".into();
                             self.pending_backup = Some(PendingBackup { folders, out_dir, filename, detected });
