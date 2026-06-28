@@ -55,8 +55,7 @@ const KNOWN_APPS: &[KnownApp] = &[
 ];
 
 struct ClosedApp {
-    /// Display name shown in the prompt.
-    name: &'static str,
+    known_index: usize,
     /// Executable path to relaunch after backup (Windows only).
     exe_path: Option<PathBuf>,
 }
@@ -297,9 +296,8 @@ impl GUIApp {
             .spawn(move || {
                 let mut actually_closed: Vec<ClosedApp> = Vec::new();
                 for app in apps {
-                    let proc = KNOWN_APPS.iter().find(|k| k.name == app.name).map(|k| k.process);
-                    let killed = proc.map(helpers::kill_process).unwrap_or(false);
-                    if killed {
+                    let proc = KNOWN_APPS[app.known_index].process;
+                    if helpers::kill_process(proc) {
                         actually_closed.push(app);
                     }
                 }
@@ -428,7 +426,7 @@ impl eframe::App for GUIApp {
                         let pending = self.pending_backup.take().unwrap();
                         let apps: Vec<ClosedApp> = pending.detected.iter()
                             .map(|&(i, ref path)| ClosedApp {
-                                name: KNOWN_APPS[i].name,
+                                known_index: i,
                                 exe_path: path.clone(),
                             })
                             .collect();
@@ -451,7 +449,7 @@ impl eframe::App for GUIApp {
                 ui.colored_label(egui::Color32::LIGHT_BLUE, "Backup finished. Relaunch apps?");
                 for app in &self.closed_apps {
                     let note = if app.exe_path.is_some() { "" } else { "Can't determine installation path" };
-                    ui.label(format!("  • {}{}", app.name, note));
+                    ui.label(format!("  • {}{}", KNOWN_APPS[app.known_index].name, note));
                 }
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
