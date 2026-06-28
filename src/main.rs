@@ -187,6 +187,7 @@ struct GUIApp {
     file_size_summary: bool,
     save_to_exe_dir: bool,
     save_template_exe_dir: bool,
+    load_templates_from_exe_dir: bool,
     backup_name_mode: BackupNameMode,
     // temporary string buffer for the name input in settings
     backup_name_input: String,
@@ -230,6 +231,7 @@ impl Default for GUIApp {
             file_size_summary: false,
             save_to_exe_dir: config.save_to_exe_dir,
             save_template_exe_dir: config.save_template_exe_dir,
+            load_templates_from_exe_dir: config.load_templates_from_exe_dir,
             backup_name_input: match &config.backup_name_mode {
                 BackupNameMode::Timestamp(s) | BackupNameMode::Fixed(s) => s.clone(),
             },
@@ -901,8 +903,14 @@ impl eframe::App for GUIApp {
                             ui.add_sized(btn_size, egui::Button::new("Load Template"))
                                 .clicked()
                                 .then(|| {
-                                    if let Some(path) =
+                                    let path = if self.load_templates_from_exe_dir {
+                                        std::env::current_exe().ok()
+                                            .and_then(|p| p.parent().map(|d| d.join("template.json")))
+                                    } else {
                                         FileDialog::new().add_filter("JSON", &["json"]).pick_file()
+                                    };
+
+                                    if let Some(path) = path
                                         && let Ok(data) = fs::read_to_string(&path) {
                                             if let Ok(template) =
                                                 serde_json::from_str::<BackupTemplate>(&data)
@@ -1115,8 +1123,14 @@ impl eframe::App for GUIApp {
                     ui.add_sized(btn_size, egui::Button::new("Edit Template"))
                         .clicked()
                         .then(|| {
-                            if let Some(path) =
+                            let path = if self.load_templates_from_exe_dir {
+                                std::env::current_exe().ok()
+                                    .and_then(|p| p.parent().map(|d| d.join("template.json")))
+                            } else {
                                 FileDialog::new().add_filter("JSON", &["json"]).pick_file()
+                            };
+
+                            if let Some(path) = path
                                 && let Ok(data) = fs::read_to_string(&path) {
                                     if let Ok(template) =
                                         serde_json::from_str::<BackupTemplate>(&data)
@@ -1205,6 +1219,7 @@ impl eframe::App for GUIApp {
 
                         ui.checkbox(&mut self.save_to_exe_dir, "Save backups to exe directory");
                         ui.checkbox(&mut self.save_template_exe_dir, "Save templates to exe directory");
+                        ui.checkbox(&mut self.load_templates_from_exe_dir, "Load templates from exe directory");
                         ui.add_space(2.0);
 
                         ui.label("Default backup location:");
@@ -1308,7 +1323,6 @@ impl eframe::App for GUIApp {
                             Some(std::path::PathBuf::from(&loc_str))
                         };
                     }
-
                     ui.add_space(4.0);
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
@@ -1324,6 +1338,7 @@ impl eframe::App for GUIApp {
                             self.config.file_size_summary = self.file_size_summary;
                             self.config.save_to_exe_dir = self.save_to_exe_dir;
                             self.config.save_template_exe_dir = self.save_template_exe_dir;
+                            self.config.load_templates_from_exe_dir = self.load_templates_from_exe_dir;
                             self.config.backup_name_mode = self.backup_name_mode.clone();
                             self.config.save();
                             *self.status.lock().unwrap() = "✅ Settings saved".into();
