@@ -592,18 +592,18 @@ pub fn detect_known_processes(_process_names: &[&str]) -> Vec<(usize, Option<Pat
 }
 
 #[cfg(target_os = "windows")]
-pub fn kill_process(process_name: &str) {
+pub fn kill_process(process_name: &str) -> bool {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x08000000;
-    let _ = std::process::Command::new("taskkill")
+    std::process::Command::new("taskkill")
     .args(["/f", "/im", process_name])
     .creation_flags(CREATE_NO_WINDOW)
     .output()
     .map(|o| o.status.success())
-    .unwrap_or(false);
+    .unwrap_or(false)
 }
 
 #[cfg(not(target_os = "windows"))]
-pub fn kill_process(_process_name: &str) {
+pub fn kill_process(_process_name: &str) -> bool {
     false
 }

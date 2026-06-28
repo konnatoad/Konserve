@@ -288,11 +288,6 @@ impl GUIApp {
 
         *status.lock().unwrap() = "Closing apps…".into();
 
-        let process_names: Vec<&'static str> = apps
-            .iter()
-            .filter_map(|a| KNOWN_APPS.iter().find(|k| k.name == a.name).map(|k| k.process))
-            .collect();
-
         let (done_tx, done_rx) = mpsc::channel::<Vec<ClosedApp>>();
         self.relaunch_rx = Some(done_rx);
 
@@ -300,8 +295,13 @@ impl GUIApp {
             .name("konserve-backup".into())
             .stack_size(8 * 1024 * 1024)
             .spawn(move || {
-                for proc in &process_names {
-                    helpers::kill_process(proc);
+                let mut actually_closed: Vec<ClosedApp> = Vec::new();
+                for app in apps {
+                    let proc = KNOWN_APPS.iter().find(|k| k.name == app.name).map(|k| k.process);
+                    let killed = proc.map(helpers::kill_process).unwrap_or(false);
+                    if killed {
+                        actually_closed.push(app);
+                    }
                 }
                 std::thread::sleep(std::time::Duration::from_millis(800));
 
@@ -316,7 +316,7 @@ impl GUIApp {
                     }
                 }
 
-                let _ = done_tx.send(apps);
+                let _ = done_tx.send(actually_closed);
             })
             .expect("failed to spawn backup thread");
     }
