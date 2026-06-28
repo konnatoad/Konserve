@@ -598,8 +598,12 @@ pub fn kill_process(process_name: &str) {
     let _ = std::process::Command::new("taskkill")
     .args(["/f", "/im", process_name])
     .creation_flags(CREATE_NO_WINDOW)
-    .output();
+    .output()
+    .map(|o| o.status.success())
+    .unwrap_or(false);
 }
 
 #[cfg(not(target_os = "windows"))]
-pub fn kill_processes(_process_name: &str) {}
+pub fn kill_process(_process_name: &str) {
+    false
+}
