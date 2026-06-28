@@ -186,6 +186,7 @@ struct GUIApp {
     automatic_updates: bool,
     file_size_summary: bool,
     save_to_exe_dir: bool,
+    save_template_exe_dir: bool,
     backup_name_mode: BackupNameMode,
     // temporary string buffer for the name input in settings
     backup_name_input: String,
@@ -228,6 +229,7 @@ impl Default for GUIApp {
             automatic_updates: config.automatic_updates,
             file_size_summary: false,
             save_to_exe_dir: config.save_to_exe_dir,
+            save_template_exe_dir: config.save_template_exe_dir,
             backup_name_input: match &config.backup_name_mode {
                 BackupNameMode::Timestamp(s) | BackupNameMode::Fixed(s) => s.clone(),
             },
@@ -558,23 +560,36 @@ impl eframe::App for GUIApp {
                 if ui.button("Add Path").clicked() {
                     self.template_paths.push(PathBuf::new());
                 }
-                if ui.button("Save Template").clicked()
-                    && let Some(path) = FileDialog::new().add_filter("JSON", &["json"]).save_file()
-                {
-                    let tpl = BackupTemplate {
-                        paths: self.template_paths.clone(),
+                    let save_path = if self.save_template_exe_dir {
+                    std::env::current_exe().ok()
+                        .and_then(|p| p.parent().map(|d| d.join("template.json")))
+                } else {
+                    None
+                };
+
+                if ui.button("Save Template").clicked() {
+                    let path = if self.save_template_exe_dir {
+                        save_path.clone()
+                    } else {
+                        FileDialog::new().add_filter("JSON", &["json"]).save_file()
                     };
-                    match serde_json::to_string_pretty(&tpl) {
-                        Ok(json) => {
-                            if fs::write(&path, json).is_ok() {
-                                *self.status.lock().unwrap() = "✅ Template saved".into();
-                                self.template_editor = false;
-                            } else {
-                                *self.status.lock().unwrap() = "❌ Couldn't write file.".into();
+
+                    if let Some(path) = path {
+                        let tpl = BackupTemplate {
+                            paths: self.template_paths.clone(),
+                        };
+                        match serde_json::to_string_pretty(&tpl) {
+                            Ok(json) => {
+                                if fs::write(&path, json).is_ok() {
+                                    *self.status.lock().unwrap() = "✅ Template saved".into();
+                                    self.template_editor = false;
+                                } else {
+                                    *self.status.lock().unwrap() = "❌ Couldn't write file.".into();
+                                }
                             }
-                        }
-                        Err(_) => {
-                            *self.status.lock().unwrap() = "❌ Failed to serialize.".into();
+                            Err(_) => {
+                                *self.status.lock().unwrap() = "❌ Failed to serialize.".into();
+                            }
                         }
                     }
                 }
@@ -924,12 +939,17 @@ impl eframe::App for GUIApp {
                                         }
                                 });
 
-                            ui.add_sized(btn_size, egui::Button::new("Save Template"))
+                                ui.add_sized(btn_size, egui::Button::new("Save Template"))
                                 .clicked()
                                 .then(|| {
-                                    if let Some(path) =
+                                    let path = if self.save_template_exe_dir {
+                                        std::env::current_exe().ok()
+                                            .and_then(|p| p.parent().map(|d| d.join("template.json")))
+                                    } else {
                                         FileDialog::new().add_filter("JSON", &["json"]).save_file()
-                                    {
+                                    };
+
+                                    if let Some(path) = path {
                                         let template = BackupTemplate {
                                             paths: self.selected_folders.clone(),
                                         };
@@ -1184,6 +1204,7 @@ impl eframe::App for GUIApp {
                         ui.add_space(2.0);
 
                         ui.checkbox(&mut self.save_to_exe_dir, "Save backups to exe directory");
+                        ui.checkbox(&mut self.save_template_exe_dir, "Save templates to exe directory");
                         ui.add_space(2.0);
 
                         ui.label("Default backup location:");
@@ -1302,6 +1323,7 @@ impl eframe::App for GUIApp {
                             self.config.automatic_updates = self.automatic_updates;
                             self.config.file_size_summary = self.file_size_summary;
                             self.config.save_to_exe_dir = self.save_to_exe_dir;
+                            self.config.save_template_exe_dir = self.save_template_exe_dir;
                             self.config.backup_name_mode = self.backup_name_mode.clone();
                             self.config.save();
                             *self.status.lock().unwrap() = "✅ Settings saved".into();

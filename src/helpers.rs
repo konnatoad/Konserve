@@ -118,6 +118,8 @@ pub struct KonserveConfig {
     #[serde(default)]
     pub save_to_exe_dir: bool,
     #[serde(default)]
+    pub save_template_exe_dir: bool,
+    #[serde(default)]
     pub backup_name_mode: BackupNameMode,
 }
 
