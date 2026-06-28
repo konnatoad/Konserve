@@ -450,7 +450,7 @@ impl eframe::App for GUIApp {
                 ui.separator();
                 ui.colored_label(egui::Color32::LIGHT_BLUE, "Backup finished. Relaunch apps?");
                 for app in &self.closed_apps {
-                    let note = if app.exe_path.is_some() { "" } else { " (failed to relaunch apps)" };
+                    let note = if app.exe_path.is_some() { "" } else { "Can't determine installation path" };
                     ui.label(format!("  • {}{}", app.name, note));
                 }
                 ui.add_space(4.0);
