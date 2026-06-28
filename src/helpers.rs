@@ -571,7 +571,14 @@ pub fn detect_known_processes(process_names: &[&str]) -> Vec<(usize, Option<Path
         for (i, proc_name) in process_names.iter().enumerate() {
             if proc_name.trim_end_matches(".exe").eq_ignore_ascii_case(name) {
                 let exe_path = if path.is_empty() { None } else { Some(PathBuf::from(path)) };
-                found.push((i, exe_path));
+                match found.iter_mut().find(|(idx, _): &&mut (usize, Option<PathBuf>)| *idx == i) {
+                    Some((_, existing_path)) => {
+                        if existing_path.is_none() && exe_path.is_some() {
+                            *existing_path = exe_path;
+                        }
+                    }
+                    None => found.push((i, exe_path)),
+                }
                 break;
             }
         }
