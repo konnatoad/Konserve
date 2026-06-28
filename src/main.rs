@@ -671,10 +671,21 @@ impl eframe::App for GUIApp {
                         }
                     }
 
-                    if let Some(apps) = self.relaunch_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
-                        self.relaunch_rx = None;
-                        self.closed_apps = apps;
-                        self.relaunch_prompt = !self.closed_apps.is_empty();
+                    if let Some(rx) = self.relaunch_rx.as_ref() {
+                        use std::sync::mpsc::TryRecvError;
+                        match rx.try_recv() {
+                            Ok(apps) => {
+                                self.relaunch_rx = None;
+                                self.closed_apps = apps;
+                                self.relaunch_prompt = !self.closed_apps.is_empty();
+                            }
+                            Err(TryRecvError::Disconnected) => {
+                                self.relaunch_rx = None;
+                            }
+                            Err(TryRecvError::Empty) => {
+                                // waiting...
+                            }
+                        }
                     }
 
                     // Handle async result from restore preview thread
