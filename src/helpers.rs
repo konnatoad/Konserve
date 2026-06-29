@@ -125,6 +125,13 @@ pub struct KonserveConfig {
     pub backup_name_mode: BackupNameMode,
 }
 
+ pub fn exe_dir() -> PathBuf {
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+            .unwrap_or(PathBuf::from("."))
+    }
+
 
 
 impl KonserveConfig {
@@ -137,6 +144,7 @@ impl KonserveConfig {
 
         base.join("konserve").join("config.json")
     }
+
 
     /// Load config from disk, falling back to defaults if missing or invalid.
     pub fn load() -> Self {

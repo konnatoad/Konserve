@@ -17,6 +17,7 @@ use helpers::parse_fingerprint;
 use helpers::render_tree;
 use helpers::verbose_log_path;
 use helpers::init_crash_log;
+use helpers::exe_dir;
 use restore::{ConflictAnswer, restore_backup};
 
 use std::{
@@ -543,7 +544,7 @@ impl eframe::App for GUIApp {
 
                                 // Browse for folder
                                 if ui.button("Browse").clicked()
-                                    && let Some(p) = FileDialog::new().pick_folder()
+                                    && let Some(p) = FileDialog::new().set_directory(exe_dir()).pick_folder()
                                 {
                                     *path = p;
                                 }
@@ -573,7 +574,7 @@ impl eframe::App for GUIApp {
                     let path = if self.save_template_exe_dir {
                         save_path.clone()
                     } else {
-                        FileDialog::new().add_filter("JSON", &["json"]).save_file()
+                        FileDialog::new().set_directory(exe_dir()).add_filter("JSON", &["json"]).save_file()
                     };
 
                     if let Some(path) = path {
@@ -774,7 +775,7 @@ impl eframe::App for GUIApp {
                             #[cfg(target_os = "macos")]
                             {
                                 // macOS wants dialogs on the main thread
-                                if let Some(folders) = FileDialog::new().pick_folders() {
+                                if let Some(folders) = FileDialog::new().set_directory(exe_dir()).pick_folders() {
                                     self.selected_folders.extend(folders);
                                     self.selected_folders.sort();
                                     self.selected_folders.dedup();
@@ -792,7 +793,7 @@ impl eframe::App for GUIApp {
 
                                     std::thread::spawn(move || {
                                         let folders =
-                                            FileDialog::new().pick_folders().unwrap_or_default();
+                                            FileDialog::new().set_directory(exe_dir()).pick_folders().unwrap_or_default();
                                         let _ = tx.send(folders);
                                     });
                                 }
@@ -802,7 +803,7 @@ impl eframe::App for GUIApp {
                         if ui.button("Add Files").clicked() {
                             #[cfg(target_os = "macos")]
                             {
-                                if let Some(files) = FileDialog::new().pick_files() {
+                                if let Some(files) = FileDialog::new().set_directory(exe_dir()).pick_files() {
                                     self.selected_folders.extend(files);
                                     self.selected_folders.sort();
                                     self.selected_folders.dedup();
@@ -819,7 +820,7 @@ impl eframe::App for GUIApp {
 
                                     std::thread::spawn(move || {
                                         let files =
-                                            FileDialog::new().pick_files().unwrap_or_default();
+                                            FileDialog::new().set_directory(exe_dir()).pick_files().unwrap_or_default();
                                         let _ = tx.send(files);
                                     });
                                 }
@@ -907,7 +908,7 @@ impl eframe::App for GUIApp {
                                         std::env::current_exe().ok()
                                             .and_then(|p| p.parent().map(|d| d.join("template.json")))
                                     } else {
-                                        FileDialog::new().add_filter("JSON", &["json"]).pick_file()
+                                        FileDialog::new().set_directory(exe_dir()).add_filter("JSON", &["json"]).pick_file()
                                     };
 
                                     if let Some(path) = path
@@ -954,7 +955,7 @@ impl eframe::App for GUIApp {
                                         std::env::current_exe().ok()
                                             .and_then(|p| p.parent().map(|d| d.join("template.json")))
                                     } else {
-                                        FileDialog::new().add_filter("JSON", &["json"]).save_file()
+                                        FileDialog::new().set_directory(exe_dir()).add_filter("JSON", &["json"]).save_file()
                                     };
 
                                     if let Some(path) = path {
@@ -994,7 +995,8 @@ impl eframe::App for GUIApp {
                                         std::env::current_exe().ok()
                                             .and_then(|p| p.parent().map(|d| d.to_path_buf()))
                                     } else {
-                                        FileDialog::new()
+                                        FileDialog::new().set_directory(exe_dir())
+
                                             .set_title("Choose backup destination")
                                             .pick_folder()
                                     };
@@ -1029,7 +1031,7 @@ impl eframe::App for GUIApp {
                                 .clicked()
                                 .then(|| {
                                     let status = self.status.clone();
-                                    if let Some(zip_file) = FileDialog::new()
+                                    if let Some(zip_file) = FileDialog::new().set_directory(exe_dir())
                                         .add_filter("Tar archives", &["tar", "tar.gz"])
                                         .pick_file()
                                     {
@@ -1127,7 +1129,7 @@ impl eframe::App for GUIApp {
                                 std::env::current_exe().ok()
                                     .and_then(|p| p.parent().map(|d| d.join("template.json")))
                             } else {
-                                FileDialog::new().add_filter("JSON", &["json"]).pick_file()
+                                FileDialog::new().set_directory(exe_dir()).add_filter("JSON", &["json"]).pick_file()
                             };
 
                             if let Some(path) = path
@@ -1226,7 +1228,7 @@ impl eframe::App for GUIApp {
                         ui.add_sized([ui.available_width(), 20.0], egui::TextEdit::singleline(&mut loc_str));
                         ui.horizontal(|ui| {
                             if ui.small_button("Browse").clicked()
-                                && let Some(folder) = rfd::FileDialog::new().pick_folder()
+                                && let Some(folder) = rfd::FileDialog::new().set_directory(exe_dir()).pick_folder()
                             {
                                 loc_str = folder.display().to_string();
                             }
