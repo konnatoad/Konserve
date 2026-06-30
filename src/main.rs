@@ -18,6 +18,7 @@ use helpers::load_icon_image;
 use helpers::parse_fingerprint;
 use helpers::render_tree;
 use helpers::verbose_log_path;
+use helpers::set_status;
 use restore::{ConflictAnswer, restore_backup};
 
 use std::{
@@ -304,7 +305,7 @@ impl GUIApp {
         self.backup_progress = Some(progress.clone());
         let verbose = self.verbose_logging;
 
-        *status.lock().unwrap() = "Closing apps…".into();
+        set_status(&status, "Closing apps…");
 
         let (done_tx, done_rx) = mpsc::channel::<Vec<ClosedApp>>();
         self.relaunch_rx = Some(done_rx);
@@ -322,14 +323,14 @@ impl GUIApp {
                 }
                 std::thread::sleep(std::time::Duration::from_millis(800));
 
-                *status.lock().unwrap() = "Packing into .tar".into();
+                set_status(&status, "Packing into .tar");
                 match backup_gui(&folders, &out_dir, &filename, &progress, verbose, false) {
                     Ok(path) => {
-                        *status.lock().unwrap() = format!("✅ Backup created:\n{}", path.display());
+                        set_status(&status, format!("✅ Backup created:\n{}", path.display()));
                     }
                     Err(e) => {
                         clog!("ERROR: backup failed: {e}");
-                        *status.lock().unwrap() = format!("❌ Backup failed: {e}");
+                        set_status(&status, format!("❌ Backup failed: {e}"));
                     }
                 }
 
@@ -351,7 +352,7 @@ impl GUIApp {
         self.backup_progress = Some(progress.clone());
         let verbose = self.verbose_logging;
 
-        *status.lock().unwrap() = "Packing into .tar".into();
+        set_status(&status, "Packing into .tar");
 
         std::thread::Builder::new()
             .name("konserve-backup".into())
@@ -366,11 +367,11 @@ impl GUIApp {
                     skip_locked,
                 ) {
                     Ok(path) => {
-                        *status.lock().unwrap() = format!("✅ Backup created:\n{}", path.display());
+                        set_status(&status, format!("✅ Backup created:\n{}", path.display()));
                     }
                     Err(e) => {
                         clog!("ERROR: backup failed: {e}");
-                        *status.lock().unwrap() = format!("❌ Backup failed: {e}");
+                        set_status(&status, format!("❌ Backup failed: {e}"));
                     }
                 }
             })
@@ -413,19 +414,29 @@ impl eframe::App for GUIApp {
                         let progress = Progress::default();
                         self.backup_progress = Some(progress.clone());
                         let verbose = self.verbose_logging;
-                        let out_dir = dest.parent().unwrap().to_path_buf();
-                        let filename = dest.file_name().unwrap().to_string_lossy().into_owned();
+                        let Some(out_dir) = dest.parent().map(|p| p.to_path_buf()) else {
+                clog!("ERROR: overwrite confirm: dest has no parent: {}", dest.display());
+                set_status(&self.status, "❌ Internal error: invalid path.");
+                self.overwrite_confirm = None;
+                return;
+            };
+            let Some(filename) = dest.file_name().map(|f| f.to_string_lossy().into_owned()) else {
+                clog!("ERROR: overwrite confirm: dest has no filename: {}", dest.display());
+                set_status(&self.status, "❌ Internal error: invalid path.");
+                self.overwrite_confirm = None;
+                return;
+            };
                         self.overwrite_confirm = None;
-                        *status.lock().unwrap() = "Packing into .tar".into();
+                        set_status(&status, "Packing into .tar");
                         std::thread::Builder::new()
                             .name("konserve-backup".into())
                             .stack_size(8 * 1024 * 1024)
                             .spawn(move || {
                                 match backup_gui(&folders, &out_dir, &filename, &progress, verbose, false) {
-                                    Ok(path) => { *status.lock().unwrap() = format!("✅ Backup created:\n{}", path.display()); }
+                                    Ok(path) => { set_status(&status, format!("✅ Backup created:\n{}", path.display())); }
                                     Err(e) => {
                                         clog!("ERROR: backup failed: {e}");
-                                        *status.lock().unwrap() = format!("❌ Backup failed: {e}");
+                                        set_status(&status, format!("❌ Backup failed: {e}"));
                                     }
                                 }
                             })
@@ -480,14 +491,22 @@ impl eframe::App for GUIApp {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     if ui.button("yes").clicked() {
-                        for app in &self.closed_apps {
-                            if let Some(path) = &app.exe_path {
-                                let _ = std::process::Command::new(path).spawn();
-                            }
-                        }
-                        self.closed_apps.clear();
-                        self.relaunch_prompt = false;
-                    }
+    let mut failed = Vec::new();
+    for app in &self.closed_apps {
+        if let Some(path) = &app.exe_path
+             && let Err(e) = std::process::Command::new(path).spawn() {
+                 clog!("ERROR: failed to relaunch {}: {e}", path.display());
+                 failed.push(KNOWN_APPS[app.known_index].name);
+             }
+    }
+    if failed.is_empty() {
+        set_status(&self.status, "");
+    } else {
+        set_status(&self.status, format!("⚠ Couldn't relaunch: {}", failed.join(", ")));
+    }
+    self.closed_apps.clear();
+    self.relaunch_prompt = false;
+}
                     if ui.button("no").clicked() {
                         self.closed_apps.clear();
                         self.relaunch_prompt = false;
@@ -674,7 +693,7 @@ impl eframe::App for GUIApp {
                             restore_backup(&zip_path, Some(selected), status.clone(), &progress, verbose, mode, conflict_ch)
                         {
                             clog!("ERROR: restore failed: {e}");
-                            *status.lock().unwrap() = format!("❌ Restore failed: {e}");
+                            set_status(&status, format!("❌ Restore failed: {e}"));
                         }
                     });
 
@@ -1029,7 +1048,7 @@ impl eframe::App for GUIApp {
                                     let status = self.status.clone();
 
                                     if folders.is_empty() {
-                                        *status.lock().unwrap() = "❌ Nothing selected.".into();
+                                        set_status(&status, "❌ Nothing selected.");
                                         return;
                                     }
 
@@ -1045,7 +1064,7 @@ impl eframe::App for GUIApp {
                                     };
 
                                     let Some(out_dir) = out_dir else {
-                                        *status.lock().unwrap() = "❌ Cancelled.".into();
+                                        set_status(&status, "❌ Cancelled.");
                                         return;
                                     };
 
@@ -1066,7 +1085,7 @@ impl eframe::App for GUIApp {
                                         return;
                                     }
 
-                                    *status.lock().unwrap() = "Checking for open apps…".into();
+                                    set_status(&status, "Checking for open apps…");
                                     self.spawn_detect_and_backup(folders, out_dir, filename);
     });
                             ui.add_sized(btn_size, egui::Button::new("Restore Backup"))
@@ -1079,7 +1098,7 @@ impl eframe::App for GUIApp {
                                         .pick_file()
                                     {
                                         self.restore_opening = true;
-                                        *status.lock().unwrap() = "⚠ Only restore archives you created yourself — opening archive…".into();
+                                        set_status(&status, "⚠ Only restore archives you created yourself — opening archive…");
 
                                         // Create a progress channel
                                         // This will be used to send the result of the restore operation
@@ -1151,7 +1170,8 @@ impl eframe::App for GUIApp {
                         .inner_margin(egui::Margin::symmetric(8, 4))
                         .show(ui, |ui| {
                             ui.set_width(ui.available_width());
-                            ui.label(self.status.lock().unwrap().as_str());
+                            let status_text = self.status.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                            ui.label(status_text.as_str());
                         });
                 }
 
