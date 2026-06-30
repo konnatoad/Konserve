@@ -242,6 +242,10 @@ pub fn processes_locking_paths(
         );
 
         if res == WIN32_ERROR(234) && needed > 0 {
+            // RM_PROCESS_INFO is a plain win32 struct, so zeroing it is fine
+            // writes_bytes below fills it before any read
+            // and we only read entries RmGetList actually populates
+            #[allow(clippy::uninit_vec)]
             let mut info_buf: Vec<RM_PROCESS_INFO> = Vec::with_capacity(needed as usize);
             info_buf.set_len(needed as usize);
             std::ptr::write_bytes(info_buf.as_mut_ptr(), 0, needed as usize);
