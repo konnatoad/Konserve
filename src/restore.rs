@@ -191,13 +191,13 @@ pub fn restore_backup(
         // If selection is active, skip entries that don't match exactly or aren't
         // inside a selected top-level folder (uuid/ prefix).
         if selected.is_some()
-    && !to_extract.contains(&path_in_tar)
-    && !to_extract.iter().any(|s| {
-        path_in_tar.len() > s.len()
-            && path_in_tar.as_bytes()[s.len()] == b'/'
-            && path_in_tar.starts_with(s.as_str())
-    })
-{
+            && !to_extract.contains(&path_in_tar)
+            && !to_extract.iter().any(|s| {
+                path_in_tar.len() > s.len()
+                    && path_in_tar.as_bytes()[s.len()] == b'/'
+                    && path_in_tar.starts_with(s.as_str())
+            })
+        {
             if verbose {
                 dlog!("[skip]    {path_in_tar}  (not selected)");
             }
