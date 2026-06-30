@@ -203,6 +203,7 @@ struct GUIApp {
     relaunch_prompt: bool,
     relaunch_rx: Option<mpsc::Receiver<Vec<ClosedApp>>>,
     config: helpers::KonserveConfig,
+    drop_zone_rect: Option<egui::Rect>,
 }
 
 impl Default for GUIApp {
@@ -248,6 +249,7 @@ impl Default for GUIApp {
             relaunch_prompt: false,
             relaunch_rx: None,
             config,
+            drop_zone_rect: None,
         };
         if app.verbose_logging {
             helpers::init_verbose_log();
@@ -863,9 +865,28 @@ impl eframe::App for GUIApp {
                         ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
                     }
 
+                    let zone_hovering = ui.ctx().input(|i| !i.raw.hovered_files.is_empty());
+                    if zone_hovering {
+                        ui.ctx().request_repaint();
+                    }
+                    let dropped_paths: Vec<PathBuf> = ui.ctx().input(|i| {
+                        i.raw.dropped_files.iter()
+                            .filter_map(|f| f.path.clone())
+                            .collect()
+                    });
+                    if !dropped_paths.is_empty() {
+                        self.selected_folders.extend(dropped_paths);
+                        self.selected_folders.sort();
+                        self.selected_folders.dedup();
+                    }
                     // Selected paths card
-                    let stroke = ui.visuals().widgets.noninteractive.bg_stroke;
-                    egui::Frame::new()
+                    let stroke = if zone_hovering {
+                        egui::Stroke::new(2.0, egui::Color32::from_rgb(80, 160, 240))
+                    } else {
+                        ui.visuals().widgets.noninteractive.bg_stroke
+                    };
+
+                    let drop_zone = egui::Frame::new()
                         .stroke(stroke)
                         .corner_radius(6.0)
                         .inner_margin(egui::Margin::symmetric(6, 4))
@@ -874,8 +895,8 @@ impl eframe::App for GUIApp {
                             if self.selected_folders.is_empty() {
                                 ui.vertical_centered(|ui| {
                                     ui.add_space(18.0);
-                                    ui.weak("No files or folders selected.");
-                                    ui.weak("Use Add Folders or Add Files above.");
+                                        ui.weak("No files or folders selected.");
+                                        ui.weak("Use Add Folders or Add Files above, or drag and drop here.");
                                     ui.add_space(18.0);
                                 });
                             } else {
@@ -910,6 +931,9 @@ impl eframe::App for GUIApp {
                                 }
                             }
                         });
+
+                    self.drop_zone_rect = Some(drop_zone.response.rect);
+
                     ui.add_space(2.0);
 
                     ui.separator();
