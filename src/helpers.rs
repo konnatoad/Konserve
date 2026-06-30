@@ -246,8 +246,11 @@ pub fn processes_locking_paths(
             // writes_bytes below fills it before any read
             // and we only read entries RmGetList actually populates
             #[allow(clippy::uninit_vec)]
-            let mut info_buf: Vec<RM_PROCESS_INFO> = Vec::with_capacity(needed as usize);
-            info_buf.set_len(needed as usize);
+            let mut info_buf: Vec<RM_PROCESS_INFO> = {
+                let mut v: Vec<RM_PROCESS_INFO> = Vec::with_capacity(needed as usize);
+                v.set_len(needed as usize);
+                v
+            };
             std::ptr::write_bytes(info_buf.as_mut_ptr(), 0, needed as usize);
 
             let mut actual_count = needed;
@@ -530,9 +533,7 @@ pub fn build_human_tree(
             Some(name) => name.to_string_lossy().to_string(),
             None => {
                 if verbose {
-                    dlog!(
-                        "[WARN] skipping malformed fingerprint entry: {original_path:?}"
-                    );
+                    dlog!("[WARN] skipping malformed fingerprint entry: {original_path:?}");
                 }
                 continue;
             }
@@ -662,7 +663,7 @@ pub fn parse_fingerprint(
         dlog!("[DEBUG] Scanning for fingerprint.txt…");
     }
 
-    // Phase 1: extract fingerprint map
+    // extract fingerprint map
     for entry in archive.entries().map_err(|e| e.to_string())? {
         let mut entry = entry.map_err(|e| e.to_string())?;
         let header_path = entry.path().map_err(|e| e.to_string())?;
@@ -690,7 +691,7 @@ pub fn parse_fingerprint(
         dlog!("[DEBUG] Re-opening archive to collect entries");
     }
 
-    // Phase 2: list remaining archive contents
+    // list remaining archive contents
     let file = File::open(zip_path).map_err(|e| e.to_string())?;
     let mut archive = Archive::new(file);
     let mut entries = Vec::new();
