@@ -101,6 +101,11 @@ pub fn close_verbose_log() {
     let _ = fs::remove_file(verbose_log_path());
 }
 
+pub fn set_status(status: &Mutex<String>, msg: impl Into<String>) {
+    let mut guard = status.lock().unwrap_or_else(|e| e.into_inner());
+    *guard = msg.into();
+}
+
 /// Write a debug message to stdout (if available) and with a timestamp to the log file.
 pub fn write_dlog(msg: &str) {
     println!("{msg}");
@@ -517,11 +522,17 @@ pub fn build_human_tree(
             .unwrap_or(&original_path)
             .display()
             .to_string();
-        let item_name = original_path
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .to_string();
+        let item_name = match original_path.file_name() {
+            Some(name) => name.to_string_lossy().to_string(),
+            None => {
+                if verbose {
+                    dlog!(
+                        "[WARN] skipping malformed fingerprint entry: {original_path:?}"
+                    );
+                }
+                continue;
+            }
+        };
 
         if verbose {
             dlog!("[DEBUG] parent_label = \"{parent_label}\", item_name = \"{item_name}\"");
