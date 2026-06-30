@@ -17,6 +17,13 @@ walkdir = "2.5.0"
 tar = "0.4.46"
 uuid = { version = "1.23.4", features = ["v4"] }
 
+[dependencies.windows]
+version = ">=0.59, <=0.62"
+features = [
+    "Win32_Foundation",
+    "Win32_System_RestartManager",
+]
+
 [build-dependencies]
 embed-resource = "3.0.9"
 

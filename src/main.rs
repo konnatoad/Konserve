@@ -268,10 +268,27 @@ impl GUIApp {
         self.detect_rx = Some(rx);
         self.detecting_apps = true;
 
+        let verbose = self.verbose_logging;
         thread::spawn(move || {
+            // Ask Restart Manager which processes hold locks on files inside
+            // the selected backup folders — ignores apps that aren't relevant.
+            let locked_names = helpers::processes_locking_paths(&folders, verbose);
+
             let process_names: Vec<&'static str> =
                 KNOWN_APPS.iter().map(|a| a.process).collect();
-            let detected = helpers::detect_known_processes(&process_names);
+
+            // Only keep apps that are both running AND locking something we're backing up.
+            let detected = helpers::detect_known_processes(&process_names)
+                .into_iter()
+                .filter(|(i, _)| {
+                    let exe_stem = KNOWN_APPS[*i].process
+                        .trim_end_matches(".exe")
+                        .to_lowercase();
+                    locked_names.iter().any(|locked| {
+                        locked.contains(&exe_stem) || exe_stem.contains(locked.as_str())
+                    })
+                })
+                .collect::<Vec<_>>();
 
             let _ = tx.send((detected, folders, out_dir, filename));
         });

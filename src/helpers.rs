@@ -13,6 +13,17 @@ use std::{
 use chrono::Local;
 use tar::Archive;
 
+#[cfg(target_os = "windows")]
+use std::os::windows::ffi::OsStrExt;
+#[cfg(target_os = "windows")]
+use windows::Win32::Foundation::WIN32_ERROR;
+#[cfg(target_os = "windows")]
+use windows::Win32::System::RestartManager::{
+    RM_PROCESS_INFO, RmEndSession, RmGetList, RmRegisterResources, RmStartSession,
+};
+#[cfg(target_os = "windows")]
+use windows::core::PCWSTR;
+
 static DEBUG_LOG: Mutex<Option<File>> = Mutex::new(None);
 static CRASH_LOG: Mutex<Option<File>> = Mutex::new(None);
 
@@ -132,6 +143,126 @@ pub struct KonserveConfig {
             .unwrap_or(PathBuf::from("."))
     }
 
+#[cfg(target_os = "windows")]
+pub fn processes_locking_paths(paths: &[PathBuf], verbose: bool) -> std::collections::HashSet<String> {
+    use std::collections::HashSet;
+    let mut locked_by: HashSet<String> = HashSet::new();
+
+    // Restart Manager only works on files, so flatten folders to their contents.
+    let mut files: Vec<PathBuf> = Vec::new();
+    for p in paths {
+        if p.is_file() {
+            files.push(p.clone());
+        } else if p.is_dir() {
+            for entry in walkdir::WalkDir::new(p).into_iter().filter_map(Result::ok) {
+                if entry.file_type().is_file() {
+                    files.push(entry.path().to_path_buf());
+                }
+            }
+        }
+    }
+
+    if files.is_empty() {
+        return locked_by;
+    }
+
+    if verbose {
+        dlog!("[DEBUG] RestartManager: scanning {} files for locks", files.len());
+    }
+
+    // Build null-terminated wide strings for each path.
+    // Must be kept alive for the duration of the unsafe block.
+    let wide_paths: Vec<Vec<u16>> = files
+        .iter()
+        .map(|p| {
+            let mut w: Vec<u16> = p.as_os_str().encode_wide().collect();
+            w.push(0);
+            w
+        })
+        .collect();
+
+    // PCWSTR is a const pointer — cast from the wide vec pointer.
+    let pcwstrs: Vec<PCWSTR> = wide_paths
+        .iter()
+        .map(|w| PCWSTR(w.as_ptr()))
+        .collect();
+
+    unsafe {
+        let mut session: u32 = 0;
+        let mut session_key = [0u16; 33];
+
+        if RmStartSession(
+            &mut session,
+            Some(0u32),
+            windows::core::PWSTR(session_key.as_mut_ptr()),
+        )
+        .is_err()
+        {
+            if verbose {
+                dlog!("[DEBUG] RestartManager: RmStartSession failed");
+            }
+            return locked_by;
+        }
+
+        if RmRegisterResources(session, Some(pcwstrs.as_slice()), None, None).is_err() {
+            if verbose {
+                dlog!("[DEBUG] RestartManager: RmRegisterResources failed");
+            }
+            let _ = RmEndSession(session);
+            return locked_by;
+        }
+
+        let mut needed: u32 = 0;
+        let mut count: u32 = 0;
+        let mut reboot_reasons: u32 = 0;
+
+        // First call with no buffer — just to get `needed` count back.
+        let res = RmGetList(
+            session,
+            &mut needed,
+            &mut count,
+            None,
+            &mut reboot_reasons as *mut u32,
+        );
+
+        if res == WIN32_ERROR(234) && needed > 0 {
+            let mut info_buf: Vec<RM_PROCESS_INFO> = Vec::with_capacity(needed as usize);
+            info_buf.set_len(needed as usize);
+            std::ptr::write_bytes(info_buf.as_mut_ptr(), 0, needed as usize);
+
+            let mut actual_count = needed;
+            let res2 = RmGetList(
+                session,
+                &mut needed,
+                &mut actual_count,
+                Some(info_buf.as_mut_ptr()),
+                &mut reboot_reasons as *mut u32,
+            );
+
+            if res2 == WIN32_ERROR(0) {
+                for info in info_buf.iter().take(actual_count as usize) {
+                    let raw = &info.strAppName;
+                    let len = raw.iter().position(|&c| c == 0).unwrap_or(raw.len());
+                    let name = String::from_utf16_lossy(&raw[..len]);
+                    if verbose {
+                        dlog!("[DEBUG] RestartManager: lock held by \"{}\"", name);
+                    }
+                    locked_by.insert(name.to_lowercase());
+                }
+            }
+        }
+
+        let _ = RmEndSession(session);
+    }
+
+    locked_by
+}
+
+// Stub for non-Windows so the call site in main.rs compiles unconditionally.
+#[cfg(not(target_os = "windows"))]
+pub fn processes_locking_paths(_paths: &[PathBuf], _verbose: bool) -> std::collections::HashSet<String> {
+    std::collections::HashSet::new()
+}
 
 
 impl KonserveConfig {
