@@ -11,13 +11,13 @@ use helpers::ConflictResolutionMode;
 use helpers::Progress;
 use helpers::build_human_tree;
 use helpers::collect_paths;
+use helpers::exe_dir;
 use helpers::fix_skip;
+use helpers::init_crash_log;
 use helpers::load_icon_image;
 use helpers::parse_fingerprint;
 use helpers::render_tree;
 use helpers::verbose_log_path;
-use helpers::init_crash_log;
-use helpers::exe_dir;
 use restore::{ConflictAnswer, restore_backup};
 
 use std::{
@@ -27,10 +27,6 @@ use std::{
     sync::{Arc, Mutex, mpsc},
     thread,
 };
-//#[cfg(target_os = "windows")]
-//use std::os::windows::process::CommandExt;
-//#[cfg(target_os = "windows")]
-//const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 use chrono::Local;
 use eframe::egui;
@@ -46,13 +42,34 @@ struct KnownApp {
 }
 
 const KNOWN_APPS: &[KnownApp] = &[
-    KnownApp { name: "Discord / Vesktop", process: "vesktop.exe"},
-    KnownApp { name: "Discord",           process: "Discord.exe"},
-    KnownApp { name: "Steam",             process: "steam.exe"},
-    KnownApp { name: "OBS Studio",        process: "obs64.exe"},
-    KnownApp { name: "Zen Browser",       process: "zen.exe"},
-    KnownApp { name: "Spotify",           process: "Spotify.exe"},
-    KnownApp { name: "ShareX",            process: "ShareX.exe"},
+    KnownApp {
+        name: "Discord / Vesktop",
+        process: "vesktop.exe",
+    },
+    KnownApp {
+        name: "Discord",
+        process: "Discord.exe",
+    },
+    KnownApp {
+        name: "Steam",
+        process: "steam.exe",
+    },
+    KnownApp {
+        name: "OBS Studio",
+        process: "obs64.exe",
+    },
+    KnownApp {
+        name: "Zen Browser",
+        process: "zen.exe",
+    },
+    KnownApp {
+        name: "Spotify",
+        process: "Spotify.exe",
+    },
+    KnownApp {
+        name: "ShareX",
+        process: "ShareX.exe",
+    },
 ];
 
 struct ClosedApp {
@@ -91,28 +108,6 @@ struct FolderTreeNode {
     children: HashMap<String, FolderTreeNode>,
     checked: bool,
     is_file: bool,
-}
-
-/// Build a [`FolderTreeNode`] tree from a flat list of path strings.
-#[allow(dead_code)]
-fn build_tree_from_paths(paths: &[String]) -> FolderTreeNode {
-    let mut root = FolderTreeNode::default();
-    for path in paths {
-        let mut current = &mut root;
-        for part in Path::new(path).components() {
-            let key = part.as_os_str().to_string_lossy().to_string();
-            current = current
-                .children
-                .entry(key.clone())
-                .or_insert(FolderTreeNode {
-                    children: HashMap::new(),
-                    checked: true,
-                    is_file: false,
-                });
-        }
-        current.is_file = true;
-    }
-    root
 }
 
 /// Entry point
@@ -276,14 +271,14 @@ impl GUIApp {
             // the selected backup folders — ignores apps that aren't relevant.
             let locked_names = helpers::processes_locking_paths(&folders, verbose);
 
-            let process_names: Vec<&'static str> =
-                KNOWN_APPS.iter().map(|a| a.process).collect();
+            let process_names: Vec<&'static str> = KNOWN_APPS.iter().map(|a| a.process).collect();
 
             // Only keep apps that are both running AND locking something we're backing up.
             let detected = helpers::detect_known_processes(&process_names)
                 .into_iter()
                 .filter(|(i, _)| {
-                    let exe_stem = KNOWN_APPS[*i].process
+                    let exe_stem = KNOWN_APPS[*i]
+                        .process
                         .trim_end_matches(".exe")
                         .to_lowercase();
                     locked_names.iter().any(|locked| {
@@ -362,7 +357,14 @@ impl GUIApp {
             .name("konserve-backup".into())
             .stack_size(8 * 1024 * 1024)
             .spawn(move || {
-                match backup_gui(&folders, &out_dir, &filename, &progress, verbose, skip_locked) {
+                match backup_gui(
+                    &folders,
+                    &out_dir,
+                    &filename,
+                    &progress,
+                    verbose,
+                    skip_locked,
+                ) {
                     Ok(path) => {
                         *status.lock().unwrap() = format!("✅ Backup created:\n{}", path.display());
                     }
