@@ -17,8 +17,8 @@ use helpers::init_crash_log;
 use helpers::load_icon_image;
 use helpers::parse_fingerprint;
 use helpers::render_tree;
-use helpers::verbose_log_path;
 use helpers::set_status;
+use helpers::verbose_log_path;
 use restore::{ConflictAnswer, restore_backup};
 
 use std::{
