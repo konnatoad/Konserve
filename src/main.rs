@@ -863,8 +863,14 @@ impl eframe::App for GUIApp {
                         ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
                     }
 
+                    let dnd_hovering = ui.ctx().input(|i| !i.raw.hovered_files.is_empty());
+
                     // Selected paths card
-                    let stroke = ui.visuals().widgets.noninteractive.bg_stroke;
+                    let stroke = if dnd_hovering {
+                        egui::Stroke::new(2.0, egui::Color32::from_rgb(80, 160, 240))
+                    } else {
+                        ui.visuals().widgets.noninteractive.bg_stroke
+                    };
                     egui::Frame::new()
                         .stroke(stroke)
                         .corner_radius(6.0)
