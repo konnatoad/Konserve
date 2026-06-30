@@ -171,7 +171,15 @@ pub fn backup_gui(
             let entry_path = entry.path();
             let metadata = entry.metadata().map_err(|e| e.to_string())?;
 
-            let relative_path = entry_path.strip_prefix(original_path).unwrap();
+            let relative_path = match entry_path.strip_prefix(original_path) {
+    Ok(p) => p,
+    Err(_) => {
+        if verbose {
+            dlog!("[WARN] skipping entry outside original_path: {}", entry_path.display());
+        }
+        continue;
+    }
+};
             let tar_entry_path = Path::new(&uuid.to_string()).join(relative_path);
 
             let mut header = Header::new_gnu();
