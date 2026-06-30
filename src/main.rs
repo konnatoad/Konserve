@@ -1136,7 +1136,7 @@ impl eframe::App for GUIApp {
                                         "Restoring..."
                                     };
                                     ui.label(progress_status);
-                                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(4));
+                                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
                                 }
                                 _ => {
                                     *p_opt = None;

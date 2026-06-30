@@ -1,6 +1,7 @@
 ﻿//! Creates `.tar` backup archives with embedded `fingerprint.txt` path mappings.
 use crate::helpers::{Progress, get_fingered};
 use crate::{clog, dlog};
+use std::io::BufWriter;
 use std::{
     fs::File,
     io,
@@ -40,7 +41,7 @@ pub fn backup_gui(
         clog!("{msg}");
         msg
     })?;
-    let mut tar_builder = Builder::new(tar_file);
+    let mut tar_builder = Builder::new(BufWriter::new(tar_file));
 
     // Start the fingerprint with identifier + info section
     let mut fingerprint_content = format!("{}\n[Backup Info]\n", get_fingered());
