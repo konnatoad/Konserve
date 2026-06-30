@@ -1,5 +1,5 @@
 ﻿//! Creates `.tar` backup archives with embedded `fingerprint.txt` path mappings.
-use crate::helpers::{Progress, get_fingered};
+use crate::helpers::{get_fingered, Progress};
 use crate::{clog, dlog};
 use std::io::BufWriter;
 use std::{
@@ -172,14 +172,17 @@ pub fn backup_gui(
             let metadata = entry.metadata().map_err(|e| e.to_string())?;
 
             let relative_path = match entry_path.strip_prefix(original_path) {
-    Ok(p) => p,
-    Err(_) => {
-        if verbose {
-            dlog!("[WARN] skipping entry outside original_path: {}", entry_path.display());
-        }
-        continue;
-    }
-};
+                Ok(p) => p,
+                Err(_) => {
+                    if verbose {
+                        dlog!(
+                            "[WARN] skipping entry outside original_path: {}",
+                            entry_path.display()
+                        );
+                    }
+                    continue;
+                }
+            };
             let tar_entry_path = Path::new(&uuid.to_string()).join(relative_path);
 
             let mut header = Header::new_gnu();
