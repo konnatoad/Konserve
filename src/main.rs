@@ -1405,8 +1405,8 @@ impl eframe::App for GUIApp {
                             self.config.save_template_exe_dir = self.save_template_exe_dir;
                             self.config.load_templates_from_exe_dir = self.load_templates_from_exe_dir;
                             self.config.backup_name_mode = self.backup_name_mode.clone();
-                            self.config.save();
-                            *self.status.lock().unwrap() = "✅ Settings saved".into();
+                            let msg = if self.config.save() { "✅ Settings saved" } else { "❌ Failed to save settings" };
+                            *self.status.lock().unwrap() = msg.into();
                             ui.ctx().request_repaint();
                         }
                     });
