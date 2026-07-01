@@ -1,5 +1,6 @@
-﻿//! Shared utilities — config, progress tracking, path helpers, tree rendering, and icon loading.
+﻿//! grab bag of shared stuff: config, progress, path helpers, tree rendering, icon loading
 use crate::FolderTreeNode;
+use chrono::Local;
 use eframe::egui;
 use eframe::egui::IconData;
 use egui::CollapsingHeader;
@@ -14,13 +15,22 @@ use std::{
         atomic::{AtomicU32, Ordering},
     },
 };
-use chrono::Local;
 use tar::Archive;
+
+#[cfg(target_os = "windows")]
+use std::os::windows::ffi::OsStrExt;
+#[cfg(target_os = "windows")]
+use windows::Win32::Foundation::WIN32_ERROR;
+#[cfg(target_os = "windows")]
+use windows::Win32::System::RestartManager::{
+    RM_PROCESS_INFO, RmEndSession, RmGetList, RmRegisterResources, RmStartSession,
+};
+#[cfg(target_os = "windows")]
+use windows::core::PCWSTR;
 
 static DEBUG_LOG: Mutex<Option<File>> = Mutex::new(None);
 static CRASH_LOG: Mutex<Option<File>> = Mutex::new(None);
 
-/// Returns the path of the verbose log file.
 pub fn verbose_log_path() -> PathBuf {
     KonserveConfig::config_path()
         .parent()
@@ -28,7 +38,7 @@ pub fn verbose_log_path() -> PathBuf {
         .join("konserve.log")
 }
 
-/// Returns the path of the crash/error log file (next to the exe).
+/// where the crash log lives, next to the exe
 pub fn crash_log_path() -> PathBuf {
     std::env::current_exe()
         .ok()
@@ -36,25 +46,23 @@ pub fn crash_log_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("konserve-crash.log"))
 }
 
-/// Opens (or creates) the crash log file next to the exe.
-/// Called once at startup — always on, no toggle.
-pub fn init_crash_log() {
-    let path = crash_log_path();
-    if let Ok(f) = OpenOptions::new().create(true).append(true).open(&path)
-        && let Ok(mut guard) = CRASH_LOG.lock()
-    {
-        *guard = Some(f);
-    }
-}
+/// no-op, just here so main.rs doesn't need to change its call site
+pub fn init_crash_log() {}
 
-/// Appends a timestamped error or crash message to the crash log.
+/// writes a timestamped line to the crash log, creates the file first time
 pub fn write_crash_log(msg: &str) {
     let ts = Local::now().format("%Y-%m-%d %H:%M:%S");
-    if let Ok(mut guard) = CRASH_LOG.lock()
-        && let Some(ref mut f) = *guard
-    {
-        let _ = writeln!(f, "[{ts}] {msg}");
-        let _ = f.flush();
+    if let Ok(mut guard) = CRASH_LOG.lock() {
+        if guard.is_none() {
+            let path = crash_log_path();
+            if let Ok(f) = OpenOptions::new().create(true).append(true).open(&path) {
+                *guard = Some(f);
+            }
+        }
+        if let Some(ref mut f) = *guard {
+            let _ = writeln!(f, "[{ts}] {msg}");
+            let _ = f.flush();
+        }
     }
 }
 
@@ -65,22 +73,59 @@ macro_rules! clog {
     }
 }
 
-/// Opens (and truncates) the verbose log file next to the config.
-/// Called when verbose logging is enabled (at startup or when the checkbox is ticked).
+static ERROR_LOG: Mutex<Option<File>> = Mutex::new(None);
+
+/// where the error dump lives, next to the exe
+pub fn error_log_path() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("konserve-error.log")))
+        .unwrap_or_else(|| PathBuf::from("konserve-error.log"))
+}
+
+/// writes a timestamped line to the error dump, creates the file first time
+/// this is for handled errors, actual panics go to the crash log instead
+pub fn write_error_log(msg: &str) {
+    let ts = Local::now().format("%Y-%m-%d %H:%M:%S");
+    if let Ok(mut guard) = ERROR_LOG.lock() {
+        if guard.is_none() {
+            let path = error_log_path();
+            if let Ok(f) = OpenOptions::new().create(true).append(true).open(&path) {
+                *guard = Some(f);
+            }
+        }
+        if let Some(ref mut f) = *guard {
+            let _ = writeln!(f, "[{ts}] {msg}");
+            let _ = f.flush();
+        }
+    }
+}
+
+#[macro_export]
+macro_rules! elog {
+    ($($arg:tt)*) => {
+        $crate::helpers::write_error_log(&format!($($arg)*))
+    }
+}
+
+/// opens (and wipes) the verbose log next to the config, called on startup or when the checkbox gets ticked
 pub fn init_verbose_log() {
     let path = verbose_log_path();
     if let Some(dir) = path.parent() {
         let _ = fs::create_dir_all(dir);
     }
-    if let Ok(f) = OpenOptions::new().create(true).truncate(true).write(true).open(&path)
+    if let Ok(f) = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&path)
         && let Ok(mut guard) = DEBUG_LOG.lock()
     {
         *guard = Some(f);
     }
 }
 
-/// Closes the log file handle and deletes the log file.
-/// Called when verbose logging is disabled via the checkbox.
+/// closes the log handle and deletes the file, called when the checkbox gets unticked
 pub fn close_verbose_log() {
     if let Ok(mut guard) = DEBUG_LOG.lock() {
         *guard = None;
@@ -88,7 +133,12 @@ pub fn close_verbose_log() {
     let _ = fs::remove_file(verbose_log_path());
 }
 
-/// Write a debug message to stdout (if available) and with a timestamp to the log file.
+pub fn set_status(status: &Mutex<String>, msg: impl Into<String>) {
+    let mut guard = status.lock().unwrap_or_else(|e| e.into_inner());
+    *guard = msg.into();
+}
+
+/// prints to stdout and timestamps into the log file
 pub fn write_dlog(msg: &str) {
     println!("{msg}");
     if let Ok(mut guard) = DEBUG_LOG.lock()
@@ -106,7 +156,7 @@ macro_rules! dlog {
     }
 }
 
-/// Persisted user settings, loaded from and saved to `konserve/config.json`.
+/// user settings, saved to konserve/config.json
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct KonserveConfig {
     #[serde(default)]
@@ -124,23 +174,164 @@ pub struct KonserveConfig {
     #[serde(default)]
     pub save_to_exe_dir: bool,
     #[serde(default)]
+    pub save_template_exe_dir: bool,
+    #[serde(default)]
+    pub load_templates_from_exe_dir: bool,
+    #[serde(default)]
     pub backup_name_mode: BackupNameMode,
 }
 
+pub fn exe_dir() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or(PathBuf::from("."))
+}
 
+#[cfg(target_os = "windows")]
+pub fn processes_locking_paths(
+    paths: &[PathBuf],
+    verbose: bool,
+) -> std::collections::HashSet<String> {
+    use std::collections::HashSet;
+    let mut locked_by: HashSet<String> = HashSet::new();
+
+    // restart manager only works on files so flatten folders down to their contents
+    let mut files: Vec<PathBuf> = Vec::new();
+    for p in paths {
+        if p.is_file() {
+            files.push(p.clone());
+        } else if p.is_dir() {
+            for entry in walkdir::WalkDir::new(p).into_iter().filter_map(Result::ok) {
+                if entry.file_type().is_file() {
+                    files.push(entry.path().to_path_buf());
+                }
+            }
+        }
+    }
+
+    if files.is_empty() {
+        return locked_by;
+    }
+
+    if verbose {
+        dlog!(
+            "[DEBUG] RestartManager: scanning {} files for locks",
+            files.len()
+        );
+    }
+
+    // build null-terminated wide strings for each path, gotta stay alive for the whole unsafe block
+    let wide_paths: Vec<Vec<u16>> = files
+        .iter()
+        .map(|p| {
+            let mut w: Vec<u16> = p.as_os_str().encode_wide().collect();
+            w.push(0);
+            w
+        })
+        .collect();
+
+    // PCWSTR is just a const pointer cast from the wide vec
+    let pcwstrs: Vec<PCWSTR> = wide_paths.iter().map(|w| PCWSTR(w.as_ptr())).collect();
+
+    unsafe {
+        let mut session: u32 = 0;
+        let mut session_key = [0u16; 33];
+
+        if RmStartSession(
+            &mut session,
+            Some(0u32),
+            windows::core::PWSTR(session_key.as_mut_ptr()),
+        )
+        .is_err()
+        {
+            if verbose {
+                dlog!("[DEBUG] RestartManager: RmStartSession failed");
+            }
+            return locked_by;
+        }
+
+        if RmRegisterResources(session, Some(pcwstrs.as_slice()), None, None).is_err() {
+            if verbose {
+                dlog!("[DEBUG] RestartManager: RmRegisterResources failed");
+            }
+            let _ = RmEndSession(session);
+            return locked_by;
+        }
+
+        let mut needed: u32 = 0;
+        let mut count: u32 = 0;
+        let mut reboot_reasons: u32 = 0;
+
+        // first call with no buffer, just to find out how big needed is
+        let res = RmGetList(
+            session,
+            &mut needed,
+            &mut count,
+            None,
+            &mut reboot_reasons as *mut u32,
+        );
+
+        if res == WIN32_ERROR(234) && needed > 0 {
+            // RM_PROCESS_INFO is a plain win32 struct so zeroing it is fine, write_bytes below
+            // fills it before we read anything and we only read what RmGetList actually populated
+            #[allow(clippy::uninit_vec)]
+            let mut info_buf: Vec<RM_PROCESS_INFO> = {
+                let mut v: Vec<RM_PROCESS_INFO> = Vec::with_capacity(needed as usize);
+                v.set_len(needed as usize);
+                v
+            };
+            std::ptr::write_bytes(info_buf.as_mut_ptr(), 0, needed as usize);
+
+            let mut actual_count = needed;
+            let res2 = RmGetList(
+                session,
+                &mut needed,
+                &mut actual_count,
+                Some(info_buf.as_mut_ptr()),
+                &mut reboot_reasons as *mut u32,
+            );
+
+            if res2 == WIN32_ERROR(0) {
+                for info in info_buf.iter().take(actual_count as usize) {
+                    let raw = &info.strAppName;
+                    let len = raw.iter().position(|&c| c == 0).unwrap_or(raw.len());
+                    let name = String::from_utf16_lossy(&raw[..len]);
+                    if verbose {
+                        dlog!("[DEBUG] RestartManager: lock held by \"{}\"", name);
+                    }
+                    locked_by.insert(name.to_lowercase());
+                }
+            }
+        }
+
+        let _ = RmEndSession(session);
+    }
+
+    locked_by
+}
+
+// stub for non-windows so main.rs still compiles
+#[cfg(not(target_os = "windows"))]
+pub fn processes_locking_paths(
+    _paths: &[PathBuf],
+    _verbose: bool,
+) -> std::collections::HashSet<String> {
+    std::collections::HashSet::new()
+}
 
 impl KonserveConfig {
-    /// Resolves `<config_dir>/konserve/config.json`, falling back to data dir, home, then `.`.
+    /// resolves konserve/config.json next to the exe
     fn config_path() -> PathBuf {
-        let base = dirs::config_dir()
-            .or_else(dirs::data_dir) // fallback
-            .or_else(dirs::home_dir)
+        let base = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
             .unwrap_or(PathBuf::from("."));
 
         base.join("konserve").join("config.json")
     }
 
-    /// Load config from disk, falling back to defaults if missing or invalid.
+    /// loads config from disk, falls back to defaults if it's missing or broken
     pub fn load() -> Self {
         let path = Self::config_path();
         if let Ok(data) = fs::read_to_string(&path)
@@ -151,32 +342,34 @@ impl KonserveConfig {
         Self::default()
     }
 
-    /// Serialize and write the config to disk, creating parent dirs as needed.
-    pub fn save(&self) {
+    /// serializes + writes config to disk, makes parent dirs if needed
+    pub fn save(&self) -> bool {
         let path = Self::config_path();
         if let Some(dir) = path.parent() {
             let _ = fs::create_dir_all(dir);
         }
 
         match serde_json::to_string_pretty(self) {
-            Ok(json) => {
-                if let Err(e) = fs::write(&path, json) {
-                    eprintln!("[ERROR] Failed to save config: {e}");
+            Ok(json) => match fs::write(&path, json) {
+                Ok(()) => true,
+                Err(e) => {
+                    write_error_log(&format!("ERROR: failed to save config {}: {e}", path.display()));
+                    false
                 }
-            }
+            },
             Err(e) => {
-                eprintln!("[ERROR] Failed to serialize config: {e}");
+                write_error_log(&format!("ERROR: failed to serialize config: {e}"));
+                false
             }
         }
     }
 }
 
-/// Controls how the backup output filename is generated.
 #[derive(Serialize, Deserialize, PartialEq, Eq, Clone)]
 pub enum BackupNameMode {
-    /// Use a strftime-style format string (e.g. `%Y-%m-%d_%H-%M-%S`).
+    /// strftime-style format string
     Timestamp(String),
-    /// Use a fixed plain string as the filename (no timestamp).
+    /// fixed name, no timestamp
     Fixed(String),
 }
 
@@ -186,7 +379,6 @@ impl Default for BackupNameMode {
     }
 }
 
-/// How to handle a file that already exists at the restore destination.
 #[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Copy, Default)]
 pub enum ConflictResolutionMode {
     #[default]
@@ -196,7 +388,7 @@ pub enum ConflictResolutionMode {
     Rename,
 }
 
-/// Thread-safe progress counter (0–100, or 101 when done).
+/// thread-safe progress counter, 0-100, 101 = done
 #[derive(Clone)]
 pub struct Progress {
     inner: Arc<AtomicU32>,
@@ -210,7 +402,7 @@ impl Progress {
     }
 
     pub fn set(&self, pct: u32) {
-        // Used relaxed ordering, as exact timing isn't critical
+        // relaxed ordering is fine, timing doesn't matter here
         self.inner.store(pct, Ordering::Relaxed);
     }
     pub fn get(&self) -> u32 {
@@ -226,25 +418,20 @@ impl Default for Progress {
     }
 }
 
-/// Loads the Konserve application icon into memory for GUI initialization.
-///
-/// Reads the PNG bytes embedded at compile time (`assets/icon.png`)
-/// and converts them into an [`IconData`] suitable for `eframe`.
-///
-/// # Panics
-/// Panics if the icon cannot be decoded.
-///
-/// # Returns
-/// An [`Arc<IconData>`] containing the icon.
+/// loads the icon (embedded at compile time) into whatever eframe wants, panics if the png is busted
 pub fn load_icon_image() -> Arc<IconData> {
     let image_bytes = include_bytes!("../assets/icon.png");
     let decoder = png::Decoder::new(std::io::Cursor::new(image_bytes));
     let mut reader = decoder.read_info().expect("Icon PNG couldn't be read");
-    let mut buf = vec![0u8; reader.output_buffer_size().expect("Icon PNG buffer size unknown")];
+    let mut buf = vec![
+        0u8;
+        reader
+            .output_buffer_size()
+            .expect("Icon PNG buffer size unknown")
+    ];
     let info = reader.next_frame(&mut buf).expect("Icon PNG frame error");
     let bytes = &buf[..info.buffer_size()];
 
-    // Convert RGB to RGBA if needed
     let rgba = match info.color_type {
         png::ColorType::Rgba => bytes.to_vec(),
         png::ColorType::Rgb => bytes
@@ -261,23 +448,31 @@ pub fn load_icon_image() -> Arc<IconData> {
     })
 }
 
-/// Recursively set the checked state of a node and all its children.
+/// checks/unchecks a node and everything under it
 fn set_all_checked(node: &mut FolderTreeNode, checked: bool, verbose: bool) {
     if verbose {
         dlog!(
             "[DEBUG] set_all_checked: Setting node (is_file: {}) to checked = {}",
-            node.is_file, checked
+            node.is_file,
+            checked
         );
     }
     node.checked = checked;
     for (name, child) in node.children.iter_mut() {
-        if verbose { dlog!("[DEBUG]   -> Descending into child: \"{name}\""); }
+        if verbose {
+            dlog!("[DEBUG]   -> Descending into child: \"{name}\"");
+        }
         set_all_checked(child, checked, verbose);
     }
 }
 
-/// Render a collapsible checkbox tree for the restore selection UI.
-pub fn render_tree(ui: &mut egui::Ui, path: &mut Vec<String>, node: &mut FolderTreeNode, verbose: bool) {
+/// draws the collapsible checkbox tree for picking what to restore
+pub fn render_tree(
+    ui: &mut egui::Ui,
+    path: &mut Vec<String>,
+    node: &mut FolderTreeNode,
+    verbose: bool,
+) {
     for (name, child) in node.children.iter_mut() {
         let mut label = name.clone();
         if !child.is_file {
@@ -288,19 +483,18 @@ pub fn render_tree(ui: &mut egui::Ui, path: &mut Vec<String>, node: &mut FolderT
         let current_path = path.join("/");
 
         if child.children.is_empty() {
-            // Leaf file node
             ui.horizontal(|ui| {
                 ui.checkbox(&mut child.checked, "");
                 ui.label(label);
             });
         } else {
-            // Folder node with children
             ui.horizontal(|ui| {
                 if ui.checkbox(&mut child.checked, "").changed() {
                     if verbose {
                         dlog!(
                             "[DEBUG] Checkbox changed: setting all children of \"{}\" to {}",
-                            current_path, child.checked
+                            current_path,
+                            child.checked
                         );
                     }
                     set_all_checked(child, child.checked, verbose);
@@ -308,12 +502,12 @@ pub fn render_tree(ui: &mut egui::Ui, path: &mut Vec<String>, node: &mut FolderT
                 CollapsingHeader::new(label)
                     .default_open(false)
                     .show(ui, |ui| {
-                        // Render the children of the current node recursively.
+                        // recurse into the children
                         render_tree(ui, path, child, verbose);
                     });
             });
 
-            // Maintain oarent state if any child is still checked
+            // keep parent checked if any child still is
             child.checked = child.children.values().any(|c| c.checked);
         }
 
@@ -321,17 +515,19 @@ pub fn render_tree(ui: &mut egui::Ui, path: &mut Vec<String>, node: &mut FolderT
     }
 }
 
-/// Build a human-readable restore tree from tar entries and the UUID → path map.
+/// builds the human-readable restore tree from tar entries + the uuid -> path map
 pub fn build_human_tree(
     entries: Vec<String>,
     path_map: HashMap<String, PathBuf>,
     verbose: bool,
 ) -> FolderTreeNode {
-    if verbose { dlog!("[DEBUG] build_human_tree: Start"); }
+    if verbose {
+        dlog!("[DEBUG] build_human_tree: Start");
+    }
     let mut root = FolderTreeNode::default();
 
-    // Pre-group entries by UUID prefix so each UUID lookup is O(1) instead of
-    // scanning the full entry list once per UUID.
+    // group entries by uuid prefix up front so lookups are O(1) instead of scanning
+    // the whole entry list every time
     let mut entries_by_uuid: HashMap<String, Vec<String>> = HashMap::new();
     for e in &entries {
         if let Some(slash) = e.find('/') {
@@ -343,20 +539,28 @@ pub fn build_human_tree(
     }
 
     for (uuid, original_path) in path_map {
-        if verbose { dlog!("[DEBUG] Processing UUID: {uuid}, Path: {original_path:?}"); }
+        if verbose {
+            dlog!("[DEBUG] Processing UUID: {uuid}, Path: {original_path:?}");
+        }
 
         let parent_label = original_path
             .parent()
             .unwrap_or(&original_path)
             .display()
             .to_string();
-        let item_name = original_path
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .to_string();
+        let item_name = match original_path.file_name() {
+            Some(name) => name.to_string_lossy().to_string(),
+            None => {
+                if verbose {
+                    dlog!("[WARN] skipping malformed fingerprint entry: {original_path:?}");
+                }
+                continue;
+            }
+        };
 
-        if verbose { dlog!("[DEBUG] parent_label = \"{parent_label}\", item_name = \"{item_name}\""); }
+        if verbose {
+            dlog!("[DEBUG] parent_label = \"{parent_label}\", item_name = \"{item_name}\"");
+        }
 
         let parent_node = root
             .children
@@ -371,23 +575,33 @@ pub fn build_human_tree(
         let dir_prefix = format!("{uuid}/");
 
         if let Some(uuid_entries) = entries_by_uuid.get(&uuid) {
-            if verbose { dlog!("[DEBUG] Detected directory backup for UUID: {uuid}"); }
+            if verbose {
+                dlog!("[DEBUG] Detected directory backup for UUID: {uuid}");
+            }
             parent_node.children.get_mut(&item_name).unwrap().is_file = false;
 
             for tar_path in uuid_entries {
-                if verbose { dlog!("[DEBUG]   tar_path = \"{tar_path}\""); }
+                if verbose {
+                    dlog!("[DEBUG]   tar_path = \"{tar_path}\"");
+                }
 
                 let rest = tar_path[dir_prefix.len()..].trim_end_matches('/');
                 if rest.is_empty() {
-                    if verbose { dlog!("[DEBUG]   Skipping empty rest after trim"); }
+                    if verbose {
+                        dlog!("[DEBUG]   Skipping empty rest after trim");
+                    }
                     continue;
                 }
 
-                if verbose { dlog!("[DEBUG]   Rest path: \"{rest}\""); }
+                if verbose {
+                    dlog!("[DEBUG]   Rest path: \"{rest}\"");
+                }
 
                 let mut cursor = parent_node.children.get_mut(&item_name).unwrap();
                 for part in rest.split('/') {
-                    if verbose { dlog!("[DEBUG]     Descending into part: \"{part}\""); }
+                    if verbose {
+                        dlog!("[DEBUG]     Descending into part: \"{part}\"");
+                    }
                     cursor = cursor
                         .children
                         .entry(part.to_string())
@@ -396,22 +610,33 @@ pub fn build_human_tree(
                 cursor.is_file = true;
             }
         } else {
-            if verbose { dlog!("[DEBUG] Detected file (not dir) for UUID: {uuid}"); }
+            if verbose {
+                dlog!("[DEBUG] Detected file (not dir) for UUID: {uuid}");
+            }
             parent_node.children.get_mut(&item_name).unwrap().is_file = true;
         }
     }
 
-    if verbose { dlog!("[DEBUG] build_human_tree: Finished building tree"); }
+    if verbose {
+        dlog!("[DEBUG] build_human_tree: Finished building tree");
+    }
     root
 }
 
-/// Recursively collect all checked file paths into a flat list.
-pub fn collect_recursive(node: &FolderTreeNode, path: &mut Vec<String>, output: &mut Vec<String>, verbose: bool) {
+/// recursively flattens all checked file paths into one list
+pub fn collect_recursive(
+    node: &FolderTreeNode,
+    path: &mut Vec<String>,
+    output: &mut Vec<String>,
+    verbose: bool,
+) {
     for (name, child) in &node.children {
         path.push(name.clone());
         if child.is_file && child.checked {
             let full_path = path.join("/");
-            if verbose { dlog!("[DEBUG] collect_recursive: Adding checked file {full_path}"); }
+            if verbose {
+                dlog!("[DEBUG] collect_recursive: Adding checked file {full_path}");
+            }
             output.push(full_path);
         }
 
@@ -420,52 +645,70 @@ pub fn collect_recursive(node: &FolderTreeNode, path: &mut Vec<String>, output: 
     }
 }
 
-/// Collect all checked paths from the root node.
+/// collects all checked paths starting from root
 pub fn collect_paths(root: &FolderTreeNode, verbose: bool) -> Vec<String> {
-    if verbose { dlog!("[DEBUG] collect_paths: Start"); }
+    if verbose {
+        dlog!("[DEBUG] collect_paths: Start");
+    }
     let mut result = Vec::new();
     let mut path = Vec::new();
     collect_recursive(root, &mut path, &mut result, verbose);
-    if verbose { dlog!("[DEBUG] collect_paths: Done, collected {} paths", result.len()); }
+    if verbose {
+        dlog!(
+            "[DEBUG] collect_paths: Done, collected {} paths",
+            result.len()
+        );
+    }
     result
 }
 
-/// Read `fingerprint.txt` from an archive and return the entry list + UUID map.
+/// reads fingerprint.txt out of the archive, returns entry list + uuid map
 pub fn parse_fingerprint(
     zip_path: &PathBuf,
     verbose: bool,
 ) -> Result<(Vec<String>, HashMap<String, PathBuf>), String> {
-    if verbose { dlog!("[DEBUG] parse_fingerprint: Opening archive at {}", zip_path.display()); }
+    if verbose {
+        dlog!(
+            "[DEBUG] parse_fingerprint: Opening archive at {}",
+            zip_path.display()
+        );
+    }
 
     let file = File::open(zip_path).map_err(|e| e.to_string())?;
     let mut archive = Archive::new(file);
     let mut path_map = HashMap::new();
 
-    if verbose { dlog!("[DEBUG] Scanning for fingerprint.txt…"); }
+    if verbose {
+        dlog!("[DEBUG] Scanning for fingerprint.txt…");
+    }
 
-    // Phase 1: extract fingerprint map
     for entry in archive.entries().map_err(|e| e.to_string())? {
         let mut entry = entry.map_err(|e| e.to_string())?;
         let header_path = entry.path().map_err(|e| e.to_string())?;
         let name = header_path.to_string_lossy();
 
         if name == "fingerprint.txt" {
-            if verbose { dlog!("[DEBUG] Found fingerprint.txt"); }
+            if verbose {
+                dlog!("[DEBUG] Found fingerprint.txt");
+            }
             let mut txt = String::new();
             entry.read_to_string(&mut txt).map_err(|e| e.to_string())?;
 
             for line in txt.lines().filter(|l| l.contains(": ")) {
                 let (uuid, p) = line.split_once(": ").unwrap();
-                if verbose { dlog!("[DEBUG]   Parsed fingerprint: {} → {}", uuid, p.trim()); }
+                if verbose {
+                    dlog!("[DEBUG]   Parsed fingerprint: {} → {}", uuid, p.trim());
+                }
                 path_map.insert(uuid.to_string(), PathBuf::from(p.trim()));
             }
             break;
         }
     }
 
-    if verbose { dlog!("[DEBUG] Re-opening archive to collect entries"); }
+    if verbose {
+        dlog!("[DEBUG] Re-opening archive to collect entries");
+    }
 
-    // Phase 2: list remaining archive contents
     let file = File::open(zip_path).map_err(|e| e.to_string())?;
     let mut archive = Archive::new(file);
     let mut entries = Vec::new();
@@ -477,7 +720,9 @@ pub fn parse_fingerprint(
 
         if entry_name != "fingerprint.txt" {
             entries.push(entry_name.clone());
-            if verbose { dlog!("[DEBUG]   Found entry: {entry_name}"); }
+            if verbose {
+                dlog!("[DEBUG]   Found entry: {entry_name}");
+            }
         }
     }
 
@@ -492,7 +737,7 @@ pub fn parse_fingerprint(
     Ok((entries, path_map))
 }
 
-/// The build fingerprint embedded at compile time via the `FINGERPRINT` env var.
+/// fingerprint baked in at compile time from the FINGERPRINT env var
 pub fn get_fingered() -> &'static str {
     const DEFAULT: &str = "DEFAULT_FINGERPRINT";
     match option_env!("FINGERPRINT") {
@@ -501,7 +746,7 @@ pub fn get_fingered() -> &'static str {
     }
 }
 
-/// Remap `C:\Users\<old>` to the current user's home directory if the prefix matches.
+/// swaps C:\Users\<old> for the current user's home dir if it matches
 pub fn adjust_path(original: &Path, current_home: &Path, verbose: bool) -> PathBuf {
     let og_str = original.to_string_lossy();
     let current_str = current_home.to_string_lossy();
@@ -516,18 +761,24 @@ pub fn adjust_path(original: &Path, current_home: &Path, verbose: bool) -> PathB
         if parts.len() > 2 {
             let old_username = parts[2];
             let expected_prefix = format!("C:\\Users\\{old_username}");
-            if verbose { dlog!("[DEBUG] Detected old user prefix: {expected_prefix}"); }
+            if verbose {
+                dlog!("[DEBUG] Detected old user prefix: {expected_prefix}");
+            }
 
             if og_str.starts_with(&expected_prefix) {
                 let rel_path = og_str.strip_prefix(&expected_prefix).unwrap_or("");
                 let adjusted = format!("{current_str}{rel_path}");
-                if verbose { dlog!("[DEBUG] Path adjusted: {og_str} → {adjusted}"); }
+                if verbose {
+                    dlog!("[DEBUG] Path adjusted: {og_str} → {adjusted}");
+                }
                 return PathBuf::from(adjusted);
             }
         }
     }
 
-    if verbose { dlog!("[DEBUG] No adjustment needed"); }
+    if verbose {
+        dlog!("[DEBUG] No adjustment needed");
+    }
     original.to_path_buf()
 }
 
@@ -544,3 +795,84 @@ pub fn fix_skip(path: &Path, verbose: bool) -> Option<PathBuf> {
     }
 }
 
+#[cfg(target_os = "windows")]
+pub fn detect_known_processes(process_names: &[&str]) -> Vec<(usize, Option<PathBuf>)> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    let names_arg = process_names
+        .iter()
+        .map(|n| format!("'{}'", n.trim_end_matches(".exe")))
+        .collect::<Vec<_>>()
+        .join(",");
+
+    let script = format!(
+        "Get-Process -Name {names_arg} -ErrorAction SilentlyContinue | \
+         ForEach-Object {{ \"$($_.ProcessName)|$($_.Path)\" }}"
+    );
+
+    let output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+
+    let mut found = Vec::new();
+    let Ok(output) = output else { return found };
+    let text = String::from_utf8_lossy(&output.stdout);
+
+    for line in text.lines() {
+        let Some((name, path)) = line.split_once('|') else {
+            continue;
+        };
+        let name = name.trim();
+        let path = path.trim();
+
+        for (i, proc_name) in process_names.iter().enumerate() {
+            if proc_name
+                .trim_end_matches(".exe")
+                .eq_ignore_ascii_case(name)
+            {
+                let exe_path = if path.is_empty() {
+                    None
+                } else {
+                    Some(PathBuf::from(path))
+                };
+                match found
+                    .iter_mut()
+                    .find(|(idx, _): &&mut (usize, Option<PathBuf>)| *idx == i)
+                {
+                    Some((_, existing_path)) => {
+                        if existing_path.is_none() && exe_path.is_some() {
+                            *existing_path = exe_path;
+                        }
+                    }
+                    None => found.push((i, exe_path)),
+                }
+                break;
+            }
+        }
+    }
+    found
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn detect_known_processes(_process_names: &[&str]) -> Vec<(usize, Option<PathBuf>)> {
+    Vec::new()
+}
+
+#[cfg(target_os = "windows")]
+pub fn kill_process(process_name: &str) -> bool {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    std::process::Command::new("taskkill")
+        .args(["/f", "/im", process_name])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn kill_process(_process_name: &str) -> bool {
+    false
+}

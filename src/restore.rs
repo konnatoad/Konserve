@@ -1,6 +1,6 @@
-﻿//! Extracts `.tar` backups, validates the fingerprint, and reconstructs original file paths.
+﻿//! unpacks .tar backups, checks the fingerprint, puts files back where they came from
 use crate::helpers::{ConflictResolutionMode, Progress, adjust_path, get_fingered};
-use crate::{dlog, clog};
+use crate::{dlog, elog};
 use std::{
     collections::{HashMap, HashSet},
     fs::{self, File},
@@ -10,14 +10,14 @@ use std::{
 };
 use tar::Archive;
 
-/// Per-file answer sent from the UI back to a paused restore thread.
+/// what the user picked when a restore hits a conflict, sent back from the ui
 pub enum ConflictAnswer {
     Overwrite,
     Skip,
     Rename,
 }
 
-/// Return the path to write to, or `None` to skip the file.
+/// figures out where to actually write, or None if we're skipping it
 fn resolve_conflict(
     dest: &Path,
     mode: ConflictResolutionMode,
@@ -48,7 +48,7 @@ fn resolve_conflict(
     }
 }
 
-/// Append `_1`, `_2`, … before the extension until a free path is found.
+/// tacks on _1, _2 etc before the extension till we find a free name
 fn unique_path(dest: &Path) -> PathBuf {
     let stem = dest.file_stem().unwrap_or_default().to_string_lossy();
     let ext = dest
@@ -66,12 +66,12 @@ fn unique_path(dest: &Path) -> PathBuf {
     }
 }
 
-/// Normalize path separators to `/` for consistent comparison.
+/// swap backslashes for / so paths compare consistently
 fn canon<S: AsRef<str>>(s: S) -> String {
     s.as_ref().replace('\\', "/")
 }
 
-/// Restore files from a `.tar` archive. If `selected` is provided, only those paths are restored.
+/// restores from the tar, if selected is given only those paths get restored
 pub fn restore_backup(
     zip_path: &PathBuf,
     selected: Option<Vec<String>>,
@@ -83,10 +83,10 @@ pub fn restore_backup(
 ) -> Result<(), String> {
     *status.lock().unwrap() = "Restoring backup…".into();
 
-    // Open archive and locate fingerprint
     let mut archive = Archive::new(File::open(zip_path).map_err(|e| {
         let msg = format!("ERROR: cannot open archive {}: {e}", zip_path.display());
-        clog!("{msg}"); msg
+        elog!("{msg}");
+        msg
     })?);
     let mut path_map: HashMap<String, PathBuf> = HashMap::new();
     let mut valid_fingerprint = false;
@@ -96,12 +96,11 @@ pub fn restore_backup(
         let header_path = entry.path().map_err(|e| e.to_string())?;
         let entry_name = header_path.to_string_lossy();
 
-        // Parse fingerprint.txt to reconstruct UUID mappings
         if entry_name == "fingerprint.txt" {
             let mut txt = String::new();
             entry.read_to_string(&mut txt).map_err(|e| e.to_string())?;
 
-            // Abort if the fingerprint marker doesn't match the expected build
+            // bail if the fingerprint doesn't match this build
             if txt.contains(get_fingered()) {
                 valid_fingerprint = true;
 
@@ -116,11 +115,16 @@ pub fn restore_backup(
     }
 
     if !valid_fingerprint {
-        clog!("ERROR: restore aborted — invalid or missing backup fingerprint in {}", zip_path.display());
+        elog!(
+            "ERROR: restore aborted — invalid or missing backup fingerprint in {}",
+            zip_path.display()
+        );
         return Err("Invalid backup fingerprint.".into());
     }
 
-    if verbose { dlog!("[fingerprint] loaded, {} uuids", path_map.len()); }
+    if verbose {
+        dlog!("[fingerprint] loaded, {} uuids", path_map.len());
+    }
 
     let mut to_extract: HashSet<String> = HashSet::new();
 
@@ -149,20 +153,27 @@ pub fn restore_backup(
         }
     }
 
-    // Count is tracked during extraction to avoid a second full archive pass.
+    // counting as we go so we don't have to walk the archive twice
     let mut total_files: u32 = 1;
     let mut done: u32 = 0;
 
-    if verbose { dlog!("[select]  to_extract = {to_extract:?}"); }
+    if verbose {
+        dlog!("[select]  to_extract = {to_extract:?}");
+    }
 
-    // Begin extraction
     let current_home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("C:\\"));
     let mut archive = Archive::new(File::open(zip_path).map_err(|e| {
-        let msg = format!("ERROR: cannot reopen archive for extraction {}: {e}", zip_path.display());
-        clog!("{msg}"); msg
+        let msg = format!(
+            "ERROR: cannot reopen archive for extraction {}: {e}",
+            zip_path.display()
+        );
+        elog!("{msg}");
+        msg
     })?);
 
-    if verbose { dlog!("[extract] scanning archive…"); }
+    if verbose {
+        dlog!("[extract] scanning archive…");
+    }
     let mut restored_count = 0;
 
     for entry_res in archive.entries().map_err(|e| e.to_string())? {
@@ -174,13 +185,19 @@ pub fn restore_backup(
             continue;
         }
 
-        // If selection is active, skip entries that don't match exactly or aren't
-        // inside a selected top-level folder (uuid/ prefix).
+        // if a selection was given, skip anything that's not an exact match or
+        // inside a selected folder (uuid/ prefix)
         if selected.is_some()
             && !to_extract.contains(&path_in_tar)
-            && !to_extract.iter().any(|s| path_in_tar.starts_with(&format!("{s}/")))
+            && !to_extract.iter().any(|s| {
+                path_in_tar.len() > s.len()
+                    && path_in_tar.as_bytes()[s.len()] == b'/'
+                    && path_in_tar.starts_with(s.as_str())
+            })
         {
-            if verbose { dlog!("[skip]    {path_in_tar}  (not selected)"); }
+            if verbose {
+                dlog!("[skip]    {path_in_tar}  (not selected)");
+            }
             continue;
         }
 
@@ -190,12 +207,14 @@ pub fn restore_backup(
         let root_component = match tar_path.components().next() {
             Some(c) => c.as_os_str().to_string_lossy().into_owned(),
             None => {
-                if verbose { dlog!("[skip]    {path_in_tar}  (empty path)"); }
+                if verbose {
+                    dlog!("[skip]    {path_in_tar}  (empty path)");
+                }
                 continue;
             }
         };
 
-        // Case 1: UUID prefix = folder root
+        // uuid prefix = folder root
         if let Some(orig_base) = path_map.get(&root_component) {
             let adjusted_base = adjust_path(orig_base, &current_home, verbose);
             let rel = tar_path
@@ -203,60 +222,85 @@ pub fn restore_backup(
                 .unwrap_or_else(|_| Path::new(""));
 
             let unpack_to = adjusted_base.join(rel);
-            if verbose { dlog!("[write] dir {path_in_tar}  →  {}", unpack_to.display()); }
+            if verbose {
+                dlog!("[write] dir {path_in_tar}  →  {}", unpack_to.display());
+            }
 
             if let Some(final_path) = resolve_conflict(&unpack_to, mode, &conflict_ch) {
                 if let Some(dir) = final_path.parent() {
                     fs::create_dir_all(dir).map_err(|e| {
                         let msg = format!("ERROR: failed to create dir {}: {e}", dir.display());
-                        clog!("{msg}"); msg
+                        elog!("{msg}");
+                        msg
                     })?;
                 }
                 entry.unpack(&final_path).map_err(|e| {
-                    let msg = format!("ERROR: failed to unpack {} → {}: {e}", path_in_tar, final_path.display());
-                    clog!("{msg}"); msg
+                    let msg = format!(
+                        "ERROR: failed to unpack {} → {}: {e}",
+                        path_in_tar,
+                        final_path.display()
+                    );
+                    elog!("{msg}");
+                    msg
                 })?;
                 restored_count += 1;
             } else {
-                if verbose { dlog!("[skip] conflict: {}", unpack_to.display()); }
+                if verbose {
+                    dlog!("[skip] conflict: {}", unpack_to.display());
+                }
             }
             done += 1;
             progress.set((done * 100) / total_files);
         }
-        // Case 2: UUID.ext = standalone file
+        // uuid.ext = standalone file
         else if let Some((uuid_part, _ext)) = root_component.split_once('.') {
             if let Some(orig_file) = path_map.get(uuid_part) {
                 let unpack_to = adjust_path(orig_file, &current_home, verbose);
-                if verbose { dlog!("[write] file {path_in_tar}  →  {}", unpack_to.display()); }
+                if verbose {
+                    dlog!("[write] file {path_in_tar}  →  {}", unpack_to.display());
+                }
 
                 if let Some(final_path) = resolve_conflict(&unpack_to, mode, &conflict_ch) {
                     if let Some(dir) = final_path.parent() {
                         fs::create_dir_all(dir).map_err(|e| {
                             let msg = format!("ERROR: failed to create dir {}: {e}", dir.display());
-                            clog!("{msg}"); msg
+                            elog!("{msg}");
+                            msg
                         })?;
                     }
                     entry.unpack(&final_path).map_err(|e| {
-                        let msg = format!("ERROR: failed to unpack {} → {}: {e}", path_in_tar, final_path.display());
-                        clog!("{msg}"); msg
+                        let msg = format!(
+                            "ERROR: failed to unpack {} → {}: {e}",
+                            path_in_tar,
+                            final_path.display()
+                        );
+                        elog!("{msg}");
+                        msg
                     })?;
                     restored_count += 1;
                 } else {
-                    if verbose { dlog!("[skip] conflict: {}", unpack_to.display()); }
+                    if verbose {
+                        dlog!("[skip] conflict: {}", unpack_to.display());
+                    }
                 }
                 done += 1;
                 progress.set((done * 100) / total_files);
             } else {
-                if verbose { dlog!("[skip]    {path_in_tar}  (uuid not in map)"); }
+                if verbose {
+                    dlog!("[skip]    {path_in_tar}  (uuid not in map)");
+                }
             }
         } else {
-            if verbose { dlog!("[skip]    {path_in_tar}  (no handler)"); }
+            if verbose {
+                dlog!("[skip]    {path_in_tar}  (no handler)");
+            }
         }
     }
 
-    if verbose { dlog!("[done]   restored {restored_count} entries"); }
+    if verbose {
+        dlog!("[done]   restored {restored_count} entries");
+    }
     *status.lock().unwrap() = "✅ Restore complete.".into();
     progress.done();
     Ok(())
 }
-

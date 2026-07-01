@@ -1,6 +1,7 @@
-﻿//! Creates `.tar` backup archives with embedded `fingerprint.txt` path mappings.
+﻿//! packs stuff into .tar archives, fingerprint.txt embedded so we can find it all again on restore
 use crate::helpers::{Progress, get_fingered};
-use crate::{dlog, clog};
+use crate::{dlog, elog};
+use std::io::BufWriter;
 use std::{
     fs::File,
     io,
@@ -12,9 +13,7 @@ use tar::{Builder, Header};
 use uuid::Uuid;
 use walkdir::WalkDir;
 
-
-/// Pack the given files/folders into a `.tar` archive with a `fingerprint.txt` inside.
-/// Returns the path to the created archive.
+/// packs the selected files/folders into a .tar with fingerprint.txt embedded, returns the archive path
 pub fn backup_gui(
     folders: &[PathBuf],
     output_dir: &Path,
@@ -29,35 +28,39 @@ pub fn backup_gui(
     }
 
     let zip_path = output_dir.join(filename);
-    if verbose { dlog!("[DEBUG] Creating backup archive: {}", zip_path.display()); }
+    if verbose {
+        dlog!("[DEBUG] Creating backup archive: {}", zip_path.display());
+    }
 
     let tar_file = File::create(&zip_path).map_err(|e| {
-        let msg = format!("ERROR: failed to create archive {}: {e}", zip_path.display());
-        clog!("{msg}"); msg
+        let msg = format!(
+            "ERROR: failed to create archive {}: {e}",
+            zip_path.display()
+        );
+        elog!("{msg}");
+        msg
     })?;
-    let mut tar_builder = Builder::new(tar_file);
+    let mut tar_builder = Builder::new(BufWriter::new(tar_file));
 
-    // Start the fingerprint with identifier + info section
     let mut fingerprint_content = format!("{}\n[Backup Info]\n", get_fingered());
 
-    // Generate stable UUID mapping for top-level input
     let folder_uuid: Vec<(Uuid, &PathBuf)> = folders
         .iter()
         .map(|folder| {
             let uuid = Uuid::new_v4();
-            if verbose { dlog!("[DEBUG] Assigned UUID {} to {}", uuid, folder.display()); }
+            if verbose {
+                dlog!("[DEBUG] Assigned UUID {} to {}", uuid, folder.display());
+            }
             (uuid, folder)
         })
         .collect();
 
     let mut done = 0u32;
 
-    // Write UUID ↔ original path mappings to fingerprint section
     for (uuid, original_path) in &folder_uuid {
         fingerprint_content.push_str(&format!("{}: {}\n", uuid, original_path.display()));
     }
 
-    // Construct and append fingerprint.txt metadata file
     let mut fingerprint_header = Header::new_gnu();
     fingerprint_header.set_size(fingerprint_content.len() as u64);
     fingerprint_header.set_mode(0o644);
@@ -71,10 +74,12 @@ pub fn backup_gui(
             fingerprint_content.as_bytes(),
         )
         .map_err(|e| e.to_string())?;
-    if verbose { dlog!("[DEBUG] fingerprint.txt added to archive"); }
+    if verbose {
+        dlog!("[DEBUG] fingerprint.txt added to archive");
+    }
 
-    // Pre-collect all entries so we count and iterate in one filesystem pass.
-    // Each element is (uuid, original_path, walk_entries_or_none).
+    // grab everything up front so we only walk the fs once instead of counting then walking again
+    // each element is (uuid, original_path, walk_entries_or_none)
     let mut all_entries: Vec<(Uuid, &PathBuf, Vec<walkdir::DirEntry>)> = Vec::new();
     let mut total_files: u32 = 0;
 
@@ -93,12 +98,25 @@ pub fn backup_gui(
     }
     let total_files = total_files.max(1);
 
-    // === Main archive population ===
+    // actually building the archive now
     for (uuid, original_path, walk_entries) in all_entries {
         if original_path.is_file() {
-            if verbose { dlog!("[DEBUG] Adding single file: {}", original_path.display()); }
+            if verbose {
+                dlog!("[DEBUG] Adding single file: {}", original_path.display());
+            }
 
-            let metadata = original_path.metadata().map_err(|e| e.to_string())?;
+            let metadata = match original_path.metadata() {
+                Ok(m) => m,
+                Err(e) => {
+                    if skip_locked {
+                        done += 1;
+                        progress.set(done * 100 / total_files);
+                        continue;
+                    }
+                    elog!("ERROR: cannot stat file {}: {e}", original_path.display());
+                    return Err(e.to_string());
+                }
+            };
             let mut header = Header::new_gnu();
             header.set_metadata(&metadata);
             header.set_cksum();
@@ -107,12 +125,15 @@ pub fn backup_gui(
                 Ok(f) => f,
                 Err(e) => {
                     if skip_locked {
-                        dlog!("[WARN] Skipping inaccessible file {}: {e}", original_path.display());
+                        dlog!(
+                            "[WARN] Skipping inaccessible file {}: {e}",
+                            original_path.display()
+                        );
                         done += 1;
                         progress.set(done * 100 / total_files);
                         continue;
                     }
-                    clog!("ERROR: cannot open file {}: {e}", original_path.display());
+                    elog!("ERROR: cannot open file {}: {e}", original_path.display());
                     return Err(e.to_string());
                 }
             };
@@ -121,16 +142,24 @@ pub fn backup_gui(
                 Some(ext) => format!("{uuid}.{ext}"),
                 None => uuid.to_string(),
             };
-            if verbose { dlog!("[DEBUG] -> Entry name in tar: {entry_name}"); }
+            if verbose {
+                dlog!("[DEBUG] -> Entry name in tar: {entry_name}");
+            }
 
             if let Err(e) = tar_builder.append_data(&mut header, entry_name, &mut f) {
                 if skip_locked {
-                    dlog!("[WARN] Skipping file {} (write error: {e})", original_path.display());
+                    dlog!(
+                        "[WARN] Skipping file {} (write error: {e})",
+                        original_path.display()
+                    );
                     done += 1;
                     progress.set(done * 100 / total_files);
                     continue;
                 }
-                clog!("ERROR: failed to write {} to archive: {e}", original_path.display());
+                elog!(
+                    "ERROR: failed to write {} to archive: {e}",
+                    original_path.display()
+                );
                 return Err(e.to_string());
             }
 
@@ -140,13 +169,35 @@ pub fn backup_gui(
             continue;
         }
 
-        if verbose { dlog!("[DEBUG] Walking folder: {}", original_path.display()); }
+        if verbose {
+            dlog!("[DEBUG] Walking folder: {}", original_path.display());
+        }
 
         for entry in walk_entries {
             let entry_path = entry.path();
-            let metadata = entry.metadata().map_err(|e| e.to_string())?;
+            let metadata = match entry.metadata() {
+                Ok(m) => m,
+                Err(e) => {
+                    if skip_locked {
+                        continue;
+                    }
+                    elog!("ERROR: cannot stat {}: {e}", entry_path.display());
+                    return Err(e.to_string());
+                }
+            };
 
-            let relative_path = entry_path.strip_prefix(original_path).unwrap();
+            let relative_path = match entry_path.strip_prefix(original_path) {
+                Ok(p) => p,
+                Err(_) => {
+                    if verbose {
+                        dlog!(
+                            "[WARN] skipping entry outside original_path: {}",
+                            entry_path.display()
+                        );
+                    }
+                    continue;
+                }
+            };
             let tar_entry_path = Path::new(&uuid.to_string()).join(relative_path);
 
             let mut header = Header::new_gnu();
@@ -154,110 +205,70 @@ pub fn backup_gui(
             header.set_cksum();
 
             if metadata.is_file() {
-                if verbose { dlog!("[DEBUG] Adding file: {}", entry_path.display()); }
+                if verbose {
+                    dlog!("[DEBUG] Adding file: {}", entry_path.display());
+                }
                 let mut file = match File::open(entry_path) {
                     Ok(f) => f,
                     Err(e) => {
                         if skip_locked {
-                            dlog!("[WARN] Skipping inaccessible file {}: {e}", entry_path.display());
+                            dlog!(
+                                "[WARN] Skipping inaccessible file {}: {e}",
+                                entry_path.display()
+                            );
                             done += 1;
                             progress.set(done * 100 / total_files);
                             continue;
                         }
-                        clog!("ERROR: cannot open file {}: {e}", entry_path.display());
+                        elog!("ERROR: cannot open file {}: {e}", entry_path.display());
                         return Err(e.to_string());
                     }
                 };
                 if let Err(e) = tar_builder.append_data(&mut header, tar_entry_path, &mut file) {
                     if skip_locked {
-                        dlog!("[WARN] Skipping file {} (write error: {e})", entry_path.display());
+                        dlog!(
+                            "[WARN] Skipping file {} (write error: {e})",
+                            entry_path.display()
+                        );
                         done += 1;
                         progress.set(done * 100 / total_files);
                         continue;
                     }
-                    clog!("ERROR: failed to write {} to archive: {e}", entry_path.display());
+                    elog!(
+                        "ERROR: failed to write {} to archive: {e}",
+                        entry_path.display()
+                    );
                     return Err(e.to_string());
                 }
 
                 done += 1;
                 progress.set(done * 100 / total_files);
             } else if metadata.is_dir() {
-                if verbose { dlog!("[DEBUG] Adding directory: {}", entry_path.display()); }
-                tar_builder
-                    .append_data(&mut header, tar_entry_path, io::empty())
-                    .map_err(|e| e.to_string())?;
+                if verbose {
+                    dlog!("[DEBUG] Adding directory: {}", entry_path.display());
+                }
+                if let Err(e) = tar_builder.append_data(&mut header, tar_entry_path, io::empty())
+                    && !skip_locked
+                {
+                    return Err(e.to_string());
+                }
             }
         }
     }
 
-    // Finalize and flush .tar structure to disk
     tar_builder.finish().map_err(|e| {
-        let msg = format!("ERROR: failed to finalize archive {}: {e}", zip_path.display());
-        clog!("{msg}"); msg
+        let msg = format!(
+            "ERROR: failed to finalize archive {}: {e}",
+            zip_path.display()
+        );
+        elog!("{msg}");
+        msg
     })?;
-    if verbose { dlog!("[DEBUG] Archive finished: {}", zip_path.display()); }
+    if verbose {
+        dlog!("[DEBUG] Archive finished: {}", zip_path.display());
+    }
 
     progress.done();
 
     Ok(zip_path)
 }
-
-// --- Legacy ZIP format (deprecated) ---
-//
-//
-// let file = File::create(&zip_path).map_err(|e| e.to_string())?;
-// let mut zip = ZipWriter::new(file);
-// let options: FileOptions<'_, ()> = FileOptions::default().compression_method(
-//     CompressionMethod::Deflated
-// );
-//
-// zip.start_file("fingerprint.txt", options).unwrap();
-// let mut fingerprint = format!("{}\n[Backup Info]\n", get_fingered());
-// for folder in folders {
-//     if let Some(name) = folder.file_name() {
-//         fingerprint.push_str(&format!(
-//             "{}: {}\n",
-//             name.to_string_lossy(),
-//             folder.display()
-//         ));
-//     }
-// }
-//
-// zip.write_all(fingerprint.as_bytes()).unwrap();
-//
-// for path in folders {
-//     if path.is_file() {
-//         let filename = path.file_name().unwrap().to_string_lossy();
-//         zip.start_file(filename, options).unwrap();
-//         let mut f = File::open(path).unwrap();
-//         io::copy(&mut f, &mut zip).unwrap();
-//     } else if path.is_dir() {
-//         for entry in WalkDir::new(path).into_iter().filter_map(Result::ok) {
-//             let entry_path = entry.path();
-//             let relative = match entry_path.strip_prefix(path) {
-//                 Ok(r) => r,
-//                 Err(_) => {
-//                     continue;
-//                 }
-//             };
-//
-//             let zip_folder = path.file_name().unwrap();
-//             let final_path = Path::new(zip_folder).join(relative);
-//
-//             if entry_path.is_file() {
-//                 zip.start_file(final_path.to_string_lossy(), options)
-//                     .unwrap();
-//                 let mut f = File::open(entry_path).unwrap();
-//                 io::copy(&mut f, &mut zip).unwrap();
-//             } else if !relative.as_os_str().is_empty() {
-//                 zip.add_directory(final_path.to_string_lossy(), options)
-//                     .unwrap();
-//             }
-//         }
-//     }
-//     }
-//
-//     zip.finish().unwrap();
-//     Ok(zip_path)
-// }
-
