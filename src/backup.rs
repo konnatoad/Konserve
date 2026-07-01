@@ -1,6 +1,6 @@
-﻿//! Creates `.tar` backup archives with embedded `fingerprint.txt` path mappings.
+﻿//! packs stuff into .tar archives, fingerprint.txt embedded so we can find it all again on restore
 use crate::helpers::{Progress, get_fingered};
-use crate::{clog, dlog};
+use crate::{dlog, elog};
 use std::io::BufWriter;
 use std::{
     fs::File,
@@ -13,8 +13,7 @@ use tar::{Builder, Header};
 use uuid::Uuid;
 use walkdir::WalkDir;
 
-/// Pack the given files/folders into a `.tar` archive with a `fingerprint.txt` inside.
-/// Returns the path to the created archive.
+/// packs the selected files/folders into a .tar with fingerprint.txt embedded, returns the archive path
 pub fn backup_gui(
     folders: &[PathBuf],
     output_dir: &Path,
@@ -38,15 +37,13 @@ pub fn backup_gui(
             "ERROR: failed to create archive {}: {e}",
             zip_path.display()
         );
-        clog!("{msg}");
+        elog!("{msg}");
         msg
     })?;
     let mut tar_builder = Builder::new(BufWriter::new(tar_file));
 
-    // Start the fingerprint with identifier + info section
     let mut fingerprint_content = format!("{}\n[Backup Info]\n", get_fingered());
 
-    // Generate stable UUID mapping for top-level input
     let folder_uuid: Vec<(Uuid, &PathBuf)> = folders
         .iter()
         .map(|folder| {
@@ -60,12 +57,10 @@ pub fn backup_gui(
 
     let mut done = 0u32;
 
-    // Write UUID ↔ original path mappings to fingerprint section
     for (uuid, original_path) in &folder_uuid {
         fingerprint_content.push_str(&format!("{}: {}\n", uuid, original_path.display()));
     }
 
-    // Construct and append fingerprint.txt metadata file
     let mut fingerprint_header = Header::new_gnu();
     fingerprint_header.set_size(fingerprint_content.len() as u64);
     fingerprint_header.set_mode(0o644);
@@ -83,8 +78,8 @@ pub fn backup_gui(
         dlog!("[DEBUG] fingerprint.txt added to archive");
     }
 
-    // Pre-collect all entries so we count and iterate in one filesystem pass.
-    // Each element is (uuid, original_path, walk_entries_or_none).
+    // grab everything up front so we only walk the fs once instead of counting then walking again
+    // each element is (uuid, original_path, walk_entries_or_none)
     let mut all_entries: Vec<(Uuid, &PathBuf, Vec<walkdir::DirEntry>)> = Vec::new();
     let mut total_files: u32 = 0;
 
@@ -103,7 +98,7 @@ pub fn backup_gui(
     }
     let total_files = total_files.max(1);
 
-    // === Main archive population ===
+    // actually building the archive now
     for (uuid, original_path, walk_entries) in all_entries {
         if original_path.is_file() {
             if verbose {
@@ -118,7 +113,7 @@ pub fn backup_gui(
                         progress.set(done * 100 / total_files);
                         continue;
                     }
-                    clog!("ERROR: cannot stat file {}: {e}", original_path.display());
+                    elog!("ERROR: cannot stat file {}: {e}", original_path.display());
                     return Err(e.to_string());
                 }
             };
@@ -138,7 +133,7 @@ pub fn backup_gui(
                         progress.set(done * 100 / total_files);
                         continue;
                     }
-                    clog!("ERROR: cannot open file {}: {e}", original_path.display());
+                    elog!("ERROR: cannot open file {}: {e}", original_path.display());
                     return Err(e.to_string());
                 }
             };
@@ -161,7 +156,7 @@ pub fn backup_gui(
                     progress.set(done * 100 / total_files);
                     continue;
                 }
-                clog!(
+                elog!(
                     "ERROR: failed to write {} to archive: {e}",
                     original_path.display()
                 );
@@ -186,7 +181,7 @@ pub fn backup_gui(
                     if skip_locked {
                         continue;
                     }
-                    clog!("ERROR: cannot stat {}: {e}", entry_path.display());
+                    elog!("ERROR: cannot stat {}: {e}", entry_path.display());
                     return Err(e.to_string());
                 }
             };
@@ -225,7 +220,7 @@ pub fn backup_gui(
                             progress.set(done * 100 / total_files);
                             continue;
                         }
-                        clog!("ERROR: cannot open file {}: {e}", entry_path.display());
+                        elog!("ERROR: cannot open file {}: {e}", entry_path.display());
                         return Err(e.to_string());
                     }
                 };
@@ -239,7 +234,7 @@ pub fn backup_gui(
                         progress.set(done * 100 / total_files);
                         continue;
                     }
-                    clog!(
+                    elog!(
                         "ERROR: failed to write {} to archive: {e}",
                         entry_path.display()
                     );
@@ -261,13 +256,12 @@ pub fn backup_gui(
         }
     }
 
-    // Finalize and flush .tar structure to disk
     tar_builder.finish().map_err(|e| {
         let msg = format!(
             "ERROR: failed to finalize archive {}: {e}",
             zip_path.display()
         );
-        clog!("{msg}");
+        elog!("{msg}");
         msg
     })?;
     if verbose {

@@ -1,4 +1,4 @@
-﻿//! Shared utilities — config, progress tracking, path helpers, tree rendering, and icon loading.
+﻿//! grab bag of shared stuff: config, progress, path helpers, tree rendering, icon loading
 use crate::FolderTreeNode;
 use chrono::Local;
 use eframe::egui;
@@ -31,7 +31,6 @@ use windows::core::PCWSTR;
 static DEBUG_LOG: Mutex<Option<File>> = Mutex::new(None);
 static CRASH_LOG: Mutex<Option<File>> = Mutex::new(None);
 
-/// Returns the path of the verbose log file.
 pub fn verbose_log_path() -> PathBuf {
     KonserveConfig::config_path()
         .parent()
@@ -39,7 +38,7 @@ pub fn verbose_log_path() -> PathBuf {
         .join("konserve.log")
 }
 
-/// Returns the path of the crash/error log file (next to the exe).
+/// where the crash log lives, next to the exe
 pub fn crash_log_path() -> PathBuf {
     std::env::current_exe()
         .ok()
@@ -47,10 +46,10 @@ pub fn crash_log_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("konserve-crash.log"))
 }
 
-/// No-op — kept so call sites in main.rs don't need changing.
+/// no-op, just here so main.rs doesn't need to change its call site
 pub fn init_crash_log() {}
 
-/// Appends a timestamped message to the crash log, creating the file on first write.
+/// writes a timestamped line to the crash log, creates the file first time
 pub fn write_crash_log(msg: &str) {
     let ts = Local::now().format("%Y-%m-%d %H:%M:%S");
     if let Ok(mut guard) = CRASH_LOG.lock() {
@@ -74,8 +73,42 @@ macro_rules! clog {
     }
 }
 
-/// Opens (and truncates) the verbose log file next to the config.
-/// Called when verbose logging is enabled (at startup or when the checkbox is ticked).
+static ERROR_LOG: Mutex<Option<File>> = Mutex::new(None);
+
+/// where the error dump lives, next to the exe
+pub fn error_log_path() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("konserve-error.log")))
+        .unwrap_or_else(|| PathBuf::from("konserve-error.log"))
+}
+
+/// writes a timestamped line to the error dump, creates the file first time
+/// this is for handled errors, actual panics go to the crash log instead
+pub fn write_error_log(msg: &str) {
+    let ts = Local::now().format("%Y-%m-%d %H:%M:%S");
+    if let Ok(mut guard) = ERROR_LOG.lock() {
+        if guard.is_none() {
+            let path = error_log_path();
+            if let Ok(f) = OpenOptions::new().create(true).append(true).open(&path) {
+                *guard = Some(f);
+            }
+        }
+        if let Some(ref mut f) = *guard {
+            let _ = writeln!(f, "[{ts}] {msg}");
+            let _ = f.flush();
+        }
+    }
+}
+
+#[macro_export]
+macro_rules! elog {
+    ($($arg:tt)*) => {
+        $crate::helpers::write_error_log(&format!($($arg)*))
+    }
+}
+
+/// opens (and wipes) the verbose log next to the config, called on startup or when the checkbox gets ticked
 pub fn init_verbose_log() {
     let path = verbose_log_path();
     if let Some(dir) = path.parent() {
@@ -92,8 +125,7 @@ pub fn init_verbose_log() {
     }
 }
 
-/// Closes the log file handle and deletes the log file.
-/// Called when verbose logging is disabled via the checkbox.
+/// closes the log handle and deletes the file, called when the checkbox gets unticked
 pub fn close_verbose_log() {
     if let Ok(mut guard) = DEBUG_LOG.lock() {
         *guard = None;
@@ -106,7 +138,7 @@ pub fn set_status(status: &Mutex<String>, msg: impl Into<String>) {
     *guard = msg.into();
 }
 
-/// Write a debug message to stdout (if available) and with a timestamp to the log file.
+/// prints to stdout and timestamps into the log file
 pub fn write_dlog(msg: &str) {
     println!("{msg}");
     if let Ok(mut guard) = DEBUG_LOG.lock()
@@ -124,7 +156,7 @@ macro_rules! dlog {
     }
 }
 
-/// Persisted user settings, loaded from and saved to `konserve/config.json`.
+/// user settings, saved to konserve/config.json
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct KonserveConfig {
     #[serde(default)]
@@ -164,7 +196,7 @@ pub fn processes_locking_paths(
     use std::collections::HashSet;
     let mut locked_by: HashSet<String> = HashSet::new();
 
-    // Restart Manager only works on files, so flatten folders to their contents.
+    // restart manager only works on files so flatten folders down to their contents
     let mut files: Vec<PathBuf> = Vec::new();
     for p in paths {
         if p.is_file() {
@@ -189,8 +221,7 @@ pub fn processes_locking_paths(
         );
     }
 
-    // Build null-terminated wide strings for each path.
-    // Must be kept alive for the duration of the unsafe block.
+    // build null-terminated wide strings for each path, gotta stay alive for the whole unsafe block
     let wide_paths: Vec<Vec<u16>> = files
         .iter()
         .map(|p| {
@@ -200,7 +231,7 @@ pub fn processes_locking_paths(
         })
         .collect();
 
-    // PCWSTR is a const pointer — cast from the wide vec pointer.
+    // PCWSTR is just a const pointer cast from the wide vec
     let pcwstrs: Vec<PCWSTR> = wide_paths.iter().map(|w| PCWSTR(w.as_ptr())).collect();
 
     unsafe {
@@ -232,7 +263,7 @@ pub fn processes_locking_paths(
         let mut count: u32 = 0;
         let mut reboot_reasons: u32 = 0;
 
-        // First call with no buffer — just to get `needed` count back.
+        // first call with no buffer, just to find out how big needed is
         let res = RmGetList(
             session,
             &mut needed,
@@ -242,9 +273,8 @@ pub fn processes_locking_paths(
         );
 
         if res == WIN32_ERROR(234) && needed > 0 {
-            // RM_PROCESS_INFO is a plain win32 struct, so zeroing it is fine
-            // writes_bytes below fills it before any read
-            // and we only read entries RmGetList actually populates
+            // RM_PROCESS_INFO is a plain win32 struct so zeroing it is fine, write_bytes below
+            // fills it before we read anything and we only read what RmGetList actually populated
             #[allow(clippy::uninit_vec)]
             let mut info_buf: Vec<RM_PROCESS_INFO> = {
                 let mut v: Vec<RM_PROCESS_INFO> = Vec::with_capacity(needed as usize);
@@ -281,7 +311,7 @@ pub fn processes_locking_paths(
     locked_by
 }
 
-// Stub for non-Windows so the call site in main.rs compiles unconditionally.
+// stub for non-windows so main.rs still compiles
 #[cfg(not(target_os = "windows"))]
 pub fn processes_locking_paths(
     _paths: &[PathBuf],
@@ -291,7 +321,7 @@ pub fn processes_locking_paths(
 }
 
 impl KonserveConfig {
-    /// Resolves `<config_dir>/konserve/config.json`, falling back to data dir, home, then `.`.
+    /// resolves konserve/config.json next to the exe
     fn config_path() -> PathBuf {
         let base = std::env::current_exe()
             .ok()
@@ -301,7 +331,7 @@ impl KonserveConfig {
         base.join("konserve").join("config.json")
     }
 
-    /// Load config from disk, falling back to defaults if missing or invalid.
+    /// loads config from disk, falls back to defaults if it's missing or broken
     pub fn load() -> Self {
         let path = Self::config_path();
         if let Ok(data) = fs::read_to_string(&path)
@@ -312,7 +342,7 @@ impl KonserveConfig {
         Self::default()
     }
 
-    /// Serialize and write the config to disk, creating parent dirs as needed.
+    /// serializes + writes config to disk, makes parent dirs if needed
     pub fn save(&self) -> bool {
         let path = Self::config_path();
         if let Some(dir) = path.parent() {
@@ -323,24 +353,23 @@ impl KonserveConfig {
             Ok(json) => match fs::write(&path, json) {
                 Ok(()) => true,
                 Err(e) => {
-                    eprintln!("[ERROR] Failed to save config: {e}");
+                    write_error_log(&format!("ERROR: failed to save config {}: {e}", path.display()));
                     false
                 }
             },
             Err(e) => {
-                eprintln!("[ERROR] Failed to serialize config: {e}");
+                write_error_log(&format!("ERROR: failed to serialize config: {e}"));
                 false
             }
         }
     }
 }
 
-/// Controls how the backup output filename is generated.
 #[derive(Serialize, Deserialize, PartialEq, Eq, Clone)]
 pub enum BackupNameMode {
-    /// Use a strftime-style format string (e.g. `%Y-%m-%d_%H-%M-%S`).
+    /// strftime-style format string
     Timestamp(String),
-    /// Use a fixed plain string as the filename (no timestamp).
+    /// fixed name, no timestamp
     Fixed(String),
 }
 
@@ -350,7 +379,6 @@ impl Default for BackupNameMode {
     }
 }
 
-/// How to handle a file that already exists at the restore destination.
 #[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Copy, Default)]
 pub enum ConflictResolutionMode {
     #[default]
@@ -360,7 +388,7 @@ pub enum ConflictResolutionMode {
     Rename,
 }
 
-/// Thread-safe progress counter (0–100, or 101 when done).
+/// thread-safe progress counter, 0-100, 101 = done
 #[derive(Clone)]
 pub struct Progress {
     inner: Arc<AtomicU32>,
@@ -374,7 +402,7 @@ impl Progress {
     }
 
     pub fn set(&self, pct: u32) {
-        // Used relaxed ordering, as exact timing isn't critical
+        // relaxed ordering is fine, timing doesn't matter here
         self.inner.store(pct, Ordering::Relaxed);
     }
     pub fn get(&self) -> u32 {
@@ -390,16 +418,7 @@ impl Default for Progress {
     }
 }
 
-/// Loads the Konserve application icon into memory for GUI initialization.
-///
-/// Reads the PNG bytes embedded at compile time (`assets/icon.png`)
-/// and converts them into an [`IconData`] suitable for `eframe`.
-///
-/// # Panics
-/// Panics if the icon cannot be decoded.
-///
-/// # Returns
-/// An [`Arc<IconData>`] containing the icon.
+/// loads the icon (embedded at compile time) into whatever eframe wants, panics if the png is busted
 pub fn load_icon_image() -> Arc<IconData> {
     let image_bytes = include_bytes!("../assets/icon.png");
     let decoder = png::Decoder::new(std::io::Cursor::new(image_bytes));
@@ -413,7 +432,6 @@ pub fn load_icon_image() -> Arc<IconData> {
     let info = reader.next_frame(&mut buf).expect("Icon PNG frame error");
     let bytes = &buf[..info.buffer_size()];
 
-    // Convert RGB to RGBA if needed
     let rgba = match info.color_type {
         png::ColorType::Rgba => bytes.to_vec(),
         png::ColorType::Rgb => bytes
@@ -430,7 +448,7 @@ pub fn load_icon_image() -> Arc<IconData> {
     })
 }
 
-/// Recursively set the checked state of a node and all its children.
+/// checks/unchecks a node and everything under it
 fn set_all_checked(node: &mut FolderTreeNode, checked: bool, verbose: bool) {
     if verbose {
         dlog!(
@@ -448,7 +466,7 @@ fn set_all_checked(node: &mut FolderTreeNode, checked: bool, verbose: bool) {
     }
 }
 
-/// Render a collapsible checkbox tree for the restore selection UI.
+/// draws the collapsible checkbox tree for picking what to restore
 pub fn render_tree(
     ui: &mut egui::Ui,
     path: &mut Vec<String>,
@@ -465,13 +483,11 @@ pub fn render_tree(
         let current_path = path.join("/");
 
         if child.children.is_empty() {
-            // Leaf file node
             ui.horizontal(|ui| {
                 ui.checkbox(&mut child.checked, "");
                 ui.label(label);
             });
         } else {
-            // Folder node with children
             ui.horizontal(|ui| {
                 if ui.checkbox(&mut child.checked, "").changed() {
                     if verbose {
@@ -486,12 +502,12 @@ pub fn render_tree(
                 CollapsingHeader::new(label)
                     .default_open(false)
                     .show(ui, |ui| {
-                        // Render the children of the current node recursively.
+                        // recurse into the children
                         render_tree(ui, path, child, verbose);
                     });
             });
 
-            // Maintain oarent state if any child is still checked
+            // keep parent checked if any child still is
             child.checked = child.children.values().any(|c| c.checked);
         }
 
@@ -499,7 +515,7 @@ pub fn render_tree(
     }
 }
 
-/// Build a human-readable restore tree from tar entries and the UUID → path map.
+/// builds the human-readable restore tree from tar entries + the uuid -> path map
 pub fn build_human_tree(
     entries: Vec<String>,
     path_map: HashMap<String, PathBuf>,
@@ -510,8 +526,8 @@ pub fn build_human_tree(
     }
     let mut root = FolderTreeNode::default();
 
-    // Pre-group entries by UUID prefix so each UUID lookup is O(1) instead of
-    // scanning the full entry list once per UUID.
+    // group entries by uuid prefix up front so lookups are O(1) instead of scanning
+    // the whole entry list every time
     let mut entries_by_uuid: HashMap<String, Vec<String>> = HashMap::new();
     for e in &entries {
         if let Some(slash) = e.find('/') {
@@ -607,7 +623,7 @@ pub fn build_human_tree(
     root
 }
 
-/// Recursively collect all checked file paths into a flat list.
+/// recursively flattens all checked file paths into one list
 pub fn collect_recursive(
     node: &FolderTreeNode,
     path: &mut Vec<String>,
@@ -629,7 +645,7 @@ pub fn collect_recursive(
     }
 }
 
-/// Collect all checked paths from the root node.
+/// collects all checked paths starting from root
 pub fn collect_paths(root: &FolderTreeNode, verbose: bool) -> Vec<String> {
     if verbose {
         dlog!("[DEBUG] collect_paths: Start");
@@ -646,7 +662,7 @@ pub fn collect_paths(root: &FolderTreeNode, verbose: bool) -> Vec<String> {
     result
 }
 
-/// Read `fingerprint.txt` from an archive and return the entry list + UUID map.
+/// reads fingerprint.txt out of the archive, returns entry list + uuid map
 pub fn parse_fingerprint(
     zip_path: &PathBuf,
     verbose: bool,
@@ -666,7 +682,6 @@ pub fn parse_fingerprint(
         dlog!("[DEBUG] Scanning for fingerprint.txt…");
     }
 
-    // extract fingerprint map
     for entry in archive.entries().map_err(|e| e.to_string())? {
         let mut entry = entry.map_err(|e| e.to_string())?;
         let header_path = entry.path().map_err(|e| e.to_string())?;
@@ -694,7 +709,6 @@ pub fn parse_fingerprint(
         dlog!("[DEBUG] Re-opening archive to collect entries");
     }
 
-    // list remaining archive contents
     let file = File::open(zip_path).map_err(|e| e.to_string())?;
     let mut archive = Archive::new(file);
     let mut entries = Vec::new();
@@ -723,7 +737,7 @@ pub fn parse_fingerprint(
     Ok((entries, path_map))
 }
 
-/// The build fingerprint embedded at compile time via the `FINGERPRINT` env var.
+/// fingerprint baked in at compile time from the FINGERPRINT env var
 pub fn get_fingered() -> &'static str {
     const DEFAULT: &str = "DEFAULT_FINGERPRINT";
     match option_env!("FINGERPRINT") {
@@ -732,7 +746,7 @@ pub fn get_fingered() -> &'static str {
     }
 }
 
-/// Remap `C:\Users\<old>` to the current user's home directory if the prefix matches.
+/// swaps C:\Users\<old> for the current user's home dir if it matches
 pub fn adjust_path(original: &Path, current_home: &Path, verbose: bool) -> PathBuf {
     let og_str = original.to_string_lossy();
     let current_str = current_home.to_string_lossy();

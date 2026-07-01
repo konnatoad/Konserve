@@ -1,4 +1,4 @@
-//! Konserve — simple desktop backup and restore tool.
+//! konserve, backs up your stuff and restores it later
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod backup;
@@ -34,11 +34,9 @@ use eframe::egui;
 use rfd::FileDialog;
 use serde::{Deserialize, Serialize};
 
-/// A known app that may lock files during backup.
+/// app that might be locking files during backup
 struct KnownApp {
-    /// Display name shown in the prompt.
     name: &'static str,
-    /// Process executable name to detect and kill.
     process: &'static str,
 }
 
@@ -75,35 +73,35 @@ const KNOWN_APPS: &[KnownApp] = &[
 
 struct ClosedApp {
     known_index: usize,
-    /// Executable path to relaunch after backup (Windows only).
+    /// exe path to relaunch after backup, windows only
     exe_path: Option<PathBuf>,
 }
 
-/// Pending backup job waiting on the app-conflict prompt.
+/// backup job waiting on the app-conflict prompt
 struct PendingBackup {
     folders: Vec<PathBuf>,
     out_dir: PathBuf,
     filename: String,
-    /// Apps detected as running: (index into KNOWN_APPS, captured exe path).
+    /// apps detected running: index into KNOWN_APPS + captured exe path
     detected: Vec<(usize, Option<PathBuf>)>,
 }
 
-/// Result sent from the restore preview thread — tree + archive path on success, error string on failure.
+/// restore preview result: tree + archive path on success, error string on fail
 type RestoreMsg = Result<(FolderTreeNode, PathBuf), String>;
 
-/// Paths returned from a background file dialog.
+/// paths back from a background file dialog
 type FileDialogMsg = Vec<PathBuf>;
 
-/// Result from the background app-detection thread.
+/// result from the background app-detection thread
 type DetectResult = (Vec<(usize, Option<PathBuf>)>, Vec<PathBuf>, PathBuf, String);
 
-/// A saved set of paths that can be reloaded for future backups.
+/// saved paths you can reload for later backups
 #[derive(Serialize, Deserialize)]
 struct BackupTemplate {
     paths: Vec<PathBuf>,
 }
 
-/// One node in the restore tree — either a file or a folder with children.
+/// one node in the restore tree, either a file or a folder with kids
 #[derive(Default)]
 struct FolderTreeNode {
     children: HashMap<String, FolderTreeNode>,
@@ -111,18 +109,13 @@ struct FolderTreeNode {
     is_file: bool,
 }
 
-/// Entry point
-///
-/// Initializes environment variables, loads the application icon,
-/// configures [`eframe::NativeOptions`], and launches the GUI.
-///
-/// Returns an [`eframe::Error`] if the GUI fails to start.
+/// entry point, sets up env vars + icon + eframe and launches the gui
 fn main() -> Result<(), eframe::Error> {
     dotenv::dotenv().ok();
 
     init_crash_log();
 
-    // Catch panics and write them to the crash log before the process dies.
+    // catch panics and dump them to the crash log before we die
     std::panic::set_hook(Box::new(|info| {
         let msg = info.to_string();
         helpers::write_crash_log(&format!("PANIC: {msg}"));
@@ -158,7 +151,7 @@ enum MainTab {
     Settings,
 }
 
-/// All application state — settings, selected paths, progress, and active tab.
+/// all the app state: settings, selected paths, progress, active tab
 struct GUIApp {
     status: Arc<Mutex<String>>,
     selected_folders: Vec<PathBuf>,
@@ -186,7 +179,7 @@ struct GUIApp {
     save_template_exe_dir: bool,
     load_templates_from_exe_dir: bool,
     backup_name_mode: BackupNameMode,
-    // temporary string buffer for the name input in settings
+    // scratch buffer for the name input in settings
     backup_name_input: String,
     overwrite_confirm: Option<PathBuf>,
     conflict_rx: Option<mpsc::Receiver<PathBuf>>,
@@ -255,7 +248,7 @@ impl Default for GUIApp {
 }
 
 impl GUIApp {
-    /// Spawn a background thread to detect conflicting apps, then kick off backup.
+    /// spawns a thread to check for conflicting apps then kicks off the backup
     fn spawn_detect_and_backup(
         &mut self,
         folders: Vec<PathBuf>,
@@ -268,13 +261,13 @@ impl GUIApp {
 
         let verbose = self.verbose_logging;
         thread::spawn(move || {
-            // Ask Restart Manager which processes hold locks on files inside
-            // the selected backup folders — ignores apps that aren't relevant.
+            // ask restart manager what's holding locks on files in the selected folders,
+            // ignore anything not relevant
             let locked_names = helpers::processes_locking_paths(&folders, verbose);
 
             let process_names: Vec<&'static str> = KNOWN_APPS.iter().map(|a| a.process).collect();
 
-            // Only keep apps that are both running AND locking something we're backing up.
+            // only keep apps that are both running and actually locking something we're backing up
             let detected = helpers::detect_known_processes(&process_names)
                 .into_iter()
                 .filter(|(i, _)| {
@@ -292,7 +285,7 @@ impl GUIApp {
         });
     }
 
-    /// Kill apps, wait for them to exit, then start backup — all in a background thread.
+    /// kills apps, waits for them to exit, then starts the backup, all on a background thread
     fn start_backup_after_kill(
         &mut self,
         folders: Vec<PathBuf>,
@@ -329,7 +322,7 @@ impl GUIApp {
                         set_status(&status, format!("✅ Backup created:\n{}", path.display()));
                     }
                     Err(e) => {
-                        clog!("ERROR: backup failed: {e}");
+                        elog!("ERROR: backup failed: {e}");
                         set_status(&status, format!("❌ Backup failed: {e}"));
                     }
                 }
@@ -339,7 +332,7 @@ impl GUIApp {
             .expect("failed to spawn backup thread");
     }
 
-    /// Spawn the backup thread. Called after any app-conflict prompt is resolved.
+    /// spawns the backup thread, called once the app-conflict prompt is resolved
     fn start_backup(
         &mut self,
         folders: Vec<PathBuf>,
@@ -370,7 +363,7 @@ impl GUIApp {
                         set_status(&status, format!("✅ Backup created:\n{}", path.display()));
                     }
                     Err(e) => {
-                        clog!("ERROR: backup failed: {e}");
+                        elog!("ERROR: backup failed: {e}");
                         set_status(&status, format!("❌ Backup failed: {e}"));
                     }
                 }
@@ -402,7 +395,7 @@ impl eframe::App for GUIApp {
             });
             ui.add_space(2.0);
 
-            // Overwrite confirmation dialog for fixed backup names
+            // overwrite confirm for fixed backup names
             if let Some(ref dest) = self.overwrite_confirm.clone() {
                 ui.separator();
                 ui.colored_label(egui::Color32::YELLOW, format!("⚠ '{}' already exists. Overwrite?", dest.file_name().unwrap_or_default().to_string_lossy()));
@@ -415,13 +408,13 @@ impl eframe::App for GUIApp {
                         self.backup_progress = Some(progress.clone());
                         let verbose = self.verbose_logging;
                         let Some(out_dir) = dest.parent().map(|p| p.to_path_buf()) else {
-                clog!("ERROR: overwrite confirm: dest has no parent: {}", dest.display());
+                elog!("ERROR: overwrite confirm: dest has no parent: {}", dest.display());
                 set_status(&self.status, "❌ Internal error: invalid path.");
                 self.overwrite_confirm = None;
                 return;
             };
             let Some(filename) = dest.file_name().map(|f| f.to_string_lossy().into_owned()) else {
-                clog!("ERROR: overwrite confirm: dest has no filename: {}", dest.display());
+                elog!("ERROR: overwrite confirm: dest has no filename: {}", dest.display());
                 set_status(&self.status, "❌ Internal error: invalid path.");
                 self.overwrite_confirm = None;
                 return;
@@ -435,7 +428,7 @@ impl eframe::App for GUIApp {
                                 match backup_gui(&folders, &out_dir, &filename, &progress, verbose, false) {
                                     Ok(path) => { set_status(&status, format!("✅ Backup created:\n{}", path.display())); }
                                     Err(e) => {
-                                        clog!("ERROR: backup failed: {e}");
+                                        elog!("ERROR: backup failed: {e}");
                                         set_status(&status, format!("❌ Backup failed: {e}"));
                                     }
                                 }
@@ -450,7 +443,7 @@ impl eframe::App for GUIApp {
                 ui.separator();
             }
 
-            // App-conflict prompt
+            // app-conflict prompt
             if let Some(ref pending) = self.pending_backup {
                 ui.separator();
                 ui.colored_label(egui::Color32::YELLOW, "⚠ The following apps may be locking files:");
@@ -495,7 +488,7 @@ impl eframe::App for GUIApp {
     for app in &self.closed_apps {
         if let Some(path) = &app.exe_path
              && let Err(e) = std::process::Command::new(path).spawn() {
-                 clog!("ERROR: failed to relaunch {}: {e}", path.display());
+                 elog!("ERROR: failed to relaunch {}: {e}", path.display());
                  failed.push(KNOWN_APPS[app.known_index].name);
              }
     }
@@ -515,7 +508,7 @@ impl eframe::App for GUIApp {
                 ui.separator();
             }
 
-            // Poll restore conflict channel and show per-file prompt
+            // poll the restore conflict channel, show the per-file prompt
             if self.conflict_file.is_none()
                 && let Some(path) = self.conflict_rx.as_ref().and_then(|rx| rx.try_recv().ok())
             {
@@ -565,7 +558,6 @@ impl eframe::App for GUIApp {
                             let mut path_str = path.display().to_string();
 
                             ui.horizontal(|ui| {
-                                // Editable path text field
                                 ui.add_sized(
                                     [240.0, 20.0],
                                     egui::TextEdit::singleline(&mut path_str),
@@ -575,21 +567,18 @@ impl eframe::App for GUIApp {
                                     *path = PathBuf::from(path_str.clone());
                                 }
 
-                                // Excistance indicator
                                 if path.exists() {
                                     ui.label("✅").on_hover_text("This path exists");
                                 } else {
                                     ui.label("❌").on_hover_text("This path does not exist");
                                 }
 
-                                // Browse for folder
                                 if ui.button("Browse").clicked()
                                     && let Some(p) = FileDialog::new().set_directory(exe_dir()).pick_folder()
                                 {
                                     *path = p;
                                 }
 
-                                // Remove path
                                 if ui.button("Remove").clicked() {
                                     to_remove = Some(i);
                                 }
@@ -622,15 +611,18 @@ impl eframe::App for GUIApp {
                             paths: self.template_paths.clone(),
                         };
                         match serde_json::to_string_pretty(&tpl) {
-                            Ok(json) => {
-                                if fs::write(&path, json).is_ok() {
+                            Ok(json) => match fs::write(&path, json) {
+                                Ok(()) => {
                                     *self.status.lock().unwrap() = "✅ Template saved".into();
                                     self.template_editor = false;
-                                } else {
+                                }
+                                Err(e) => {
+                                    elog!("ERROR: failed to write template {}: {e}", path.display());
                                     *self.status.lock().unwrap() = "❌ Couldn't write file.".into();
                                 }
-                            }
-                            Err(_) => {
+                            },
+                            Err(e) => {
+                                elog!("ERROR: failed to serialize template: {e}");
                                 *self.status.lock().unwrap() = "❌ Failed to serialize.".into();
                             }
                         }
@@ -692,7 +684,7 @@ impl eframe::App for GUIApp {
                         if let Err(e) =
                             restore_backup(&zip_path, Some(selected), status.clone(), &progress, verbose, mode, conflict_ch)
                         {
-                            clog!("ERROR: restore failed: {e}");
+                            elog!("ERROR: restore failed: {e}");
                             set_status(&status, format!("❌ Restore failed: {e}"));
                         }
                     });
@@ -713,7 +705,7 @@ impl eframe::App for GUIApp {
 
             match self.tab {
                 MainTab::Home => {
-                    // Poll detect-apps thread result
+                    // poll the detect-apps thread
                     if let Some((detected, folders, out_dir, filename)) =
                         self.detect_rx.as_ref().and_then(|rx| rx.try_recv().ok())
                     {
@@ -744,13 +736,13 @@ impl eframe::App for GUIApp {
                         }
                     }
 
-                    // Handle async result from restore preview thread
+                    // handle the restore preview thread's result
                     if let Some(finished_msg) =
                         self.restore_rx.as_ref().and_then(|rx| rx.try_recv().ok())
                     {
                         match finished_msg {
                             Ok((mut tree, zip)) => {
-                                // Recursively check all nodes in the tree
+                                // checks every node in the tree
                                 fn check_all(n: &mut FolderTreeNode) {
                                     n.checked = true;
                                     for c in n.children.values_mut() {
@@ -766,7 +758,7 @@ impl eframe::App for GUIApp {
                                 *self.status.lock().unwrap() = String::new();
                             }
                             Err(e) => {
-                                clog!("ERROR: failed to open archive: {e}");
+                                elog!("ERROR: failed to open archive: {e}");
                                 *self.status.lock().unwrap() = format!("❌ Failed to open archive: {e}");
                             }
                         }
@@ -803,7 +795,7 @@ impl eframe::App for GUIApp {
                     ui.separator();
                     ui.add_space(2.0);
 
-                    // Folder and File Pickers
+                    // folder + file pickers
                     egui::Frame::new()
                         .fill(ui.visuals().faint_bg_color)
                         .corner_radius(6.0)
@@ -814,7 +806,7 @@ impl eframe::App for GUIApp {
                         if ui.button("Add Folders").clicked() {
                             #[cfg(target_os = "macos")]
                             {
-                                // macOS wants dialogs on the main thread
+                                // macos wants dialogs on the main thread
                                 if let Some(folders) = FileDialog::new().set_directory(exe_dir()).pick_folders() {
                                     self.selected_folders.extend(folders);
                                     self.selected_folders.sort();
@@ -824,7 +816,7 @@ impl eframe::App for GUIApp {
 
                             #[cfg(not(target_os = "macos"))]
                             {
-                                // Linux / Windows: run dialog in a background thread
+                                // linux/windows: run the dialog on a background thread
                                 if self.file_dialog_rx.is_none() {
                                     self.file_dialog_opening = true;
 
@@ -900,7 +892,7 @@ impl eframe::App for GUIApp {
                         self.selected_folders.sort();
                         self.selected_folders.dedup();
                     }
-                    // Selected paths card
+                    // selected paths card
                     let stroke = if zone_hovering {
                         egui::Stroke::new(2.0, egui::Color32::from_rgb(80, 160, 240))
                     } else {
@@ -959,7 +951,7 @@ impl eframe::App for GUIApp {
 
                     ui.separator();
 
-                    // Template and Action Buttons
+                    // template + action buttons
                     ui.horizontal(|ui| {
                         ui.vertical(|ui| {
                             let btn_size = egui::vec2(110.0, 24.0);
@@ -973,41 +965,47 @@ impl eframe::App for GUIApp {
                                         FileDialog::new().set_directory(exe_dir()).add_filter("JSON", &["json"]).pick_file()
                                     };
 
-                                    if let Some(path) = path
-                                        && let Ok(data) = fs::read_to_string(&path) {
-                                            if let Ok(template) =
-                                                serde_json::from_str::<BackupTemplate>(&data)
-                                            {
-                                                let mut valid = Vec::new();
-                                                let mut skipped = Vec::new();
+                                    if let Some(path) = path {
+                                        match fs::read_to_string(&path) {
+                                            Ok(data) => match serde_json::from_str::<BackupTemplate>(&data) {
+                                                Ok(template) => {
+                                                    let mut valid = Vec::new();
+                                                    let mut skipped = Vec::new();
 
-                                                let verbose = self.verbose_logging;
-                                                for p in template.paths {
-                                                    match fix_skip(&p, verbose) {
-                                                        Some(adjusted) => valid.push(adjusted),
-                                                        None => skipped.push(p),
+                                                    let verbose = self.verbose_logging;
+                                                    for p in template.paths {
+                                                        match fix_skip(&p, verbose) {
+                                                            Some(adjusted) => valid.push(adjusted),
+                                                            None => skipped.push(p),
+                                                        }
                                                     }
+
+                                                    self.selected_folders = valid;
+                                                    let msg = if skipped.is_empty() {
+                                                        "✅ Template loaded".into()
+                                                    } else {
+                                                        // tell them how many got skipped
+                                                        format!(
+                                                            "✅ Loaded with {} paths skipped",
+                                                            skipped.len()
+                                                        )
+                                                    };
+
+                                                    *self.status.lock().unwrap() = msg;
                                                 }
-
-                                                // Sort and deduplicate the paths
-                                                self.selected_folders = valid;
-                                                // Sort the paths
-                                                let msg = if skipped.is_empty() {
-                                                    "✅ Template loaded".into()
-                                                } else {
-                                                    // If there are skipped paths, show how many were skipped
-                                                    format!(
-                                                        "✅ Loaded with {} paths skipped",
-                                                        skipped.len()
-                                                    )
-                                                };
-
-                                                *self.status.lock().unwrap() = msg;
-                                            } else {
+                                                Err(e) => {
+                                                    elog!("ERROR: failed to parse template {}: {e}", path.display());
+                                                    *self.status.lock().unwrap() =
+                                                        "❌ Bad template format.".into();
+                                                }
+                                            },
+                                            Err(e) => {
+                                                elog!("ERROR: failed to read template {}: {e}", path.display());
                                                 *self.status.lock().unwrap() =
-                                                    "❌ Bad template format.".into();
+                                                    "❌ Couldn't read template file.".into();
                                             }
                                         }
+                                    }
                                 });
 
                                 ui.add_sized(btn_size, egui::Button::new("Save Template"))
@@ -1025,13 +1023,22 @@ impl eframe::App for GUIApp {
                                             paths: self.selected_folders.clone(),
                                         };
 
-                                        if let Ok(json) = serde_json::to_string_pretty(&template) {
-                                            if fs::write(&path, json).is_ok() {
+                                        match serde_json::to_string_pretty(&template) {
+                                            Ok(json) => match fs::write(&path, json) {
+                                                Ok(()) => {
+                                                    *self.status.lock().unwrap() =
+                                                        "✅ Template saved.".into();
+                                                }
+                                                Err(e) => {
+                                                    elog!("ERROR: failed to write template {}: {e}", path.display());
+                                                    *self.status.lock().unwrap() =
+                                                        "❌ Failed to write template.".into();
+                                                }
+                                            },
+                                            Err(e) => {
+                                                elog!("ERROR: failed to serialize template: {e}");
                                                 *self.status.lock().unwrap() =
-                                                    "✅ Template saved.".into();
-                                            } else {
-                                                *self.status.lock().unwrap() =
-                                                    "❌ Failed to write template.".into();
+                                                    "❌ Failed to serialize template.".into();
                                             }
                                         }
                                     }
@@ -1043,7 +1050,6 @@ impl eframe::App for GUIApp {
                                 .fill(egui::Color32::from_rgb(40, 100, 180)))
                                 .clicked()
                                 .then(|| {
-                                    // Check if any folders are selected
                                     let folders = self.selected_folders.clone();
                                     let status = self.status.clone();
 
@@ -1052,7 +1058,7 @@ impl eframe::App for GUIApp {
                                         return;
                                     }
 
-                                    // Resolve output directory
+                                    // figure out where to save it
                                     let out_dir = if self.save_to_exe_dir {
                                         std::env::current_exe().ok()
                                             .and_then(|p| p.parent().map(|d| d.to_path_buf()))
@@ -1068,7 +1074,7 @@ impl eframe::App for GUIApp {
                                         return;
                                     };
 
-                                    // Resolve filename
+                                    // figure out the filename
                                     let filename = match &self.backup_name_mode {
                                         BackupNameMode::Timestamp(fmt) => {
                                             format!("backup_{}.tar", Local::now().format(fmt))
@@ -1078,7 +1084,7 @@ impl eframe::App for GUIApp {
                                         }
                                     };
 
-                                    // Check for overwrite if fixed name
+                                    // check for overwrite if it's a fixed name
                                     let dest = out_dir.join(&filename);
                                     if matches!(self.backup_name_mode, BackupNameMode::Fixed(_)) && dest.exists() {
                                         self.overwrite_confirm = Some(dest);
@@ -1100,8 +1106,6 @@ impl eframe::App for GUIApp {
                                         self.restore_opening = true;
                                         set_status(&status, "⚠ Only restore archives you created yourself — opening archive…");
 
-                                        // Create a progress channel
-                                        // This will be used to send the result of the restore operation
                                         let (tx, rx) = mpsc::channel::<RestoreMsg>();
                                         self.restore_rx = Some(rx);
                                         let verbose = self.verbose_logging;
@@ -1114,7 +1118,6 @@ impl eframe::App for GUIApp {
                                                         zip_file.clone(),
                                                     )
                                                 });
-                                            // Send the result back to the main thread
                                             let _ = tx.send(result);
                                         });
                                     }
@@ -1195,22 +1198,30 @@ impl eframe::App for GUIApp {
                                 FileDialog::new().set_directory(exe_dir()).add_filter("JSON", &["json"]).pick_file()
                             };
 
-                            if let Some(path) = path
-                                && let Ok(data) = fs::read_to_string(&path) {
-                                    if let Ok(template) =
-                                        serde_json::from_str::<BackupTemplate>(&data)
-                                    {
-                                        self.template_paths = template
-                                            .paths
-                                            .into_iter()
-                                            .map(|p| fix_skip(&p, self.verbose_logging).unwrap_or(p))
-                                            .collect();
-                                        self.template_editor = true;
-                                    } else {
+                            if let Some(path) = path {
+                                match fs::read_to_string(&path) {
+                                    Ok(data) => match serde_json::from_str::<BackupTemplate>(&data) {
+                                        Ok(template) => {
+                                            self.template_paths = template
+                                                .paths
+                                                .into_iter()
+                                                .map(|p| fix_skip(&p, self.verbose_logging).unwrap_or(p))
+                                                .collect();
+                                            self.template_editor = true;
+                                        }
+                                        Err(e) => {
+                                            elog!("ERROR: failed to parse template {}: {e}", path.display());
+                                            *self.status.lock().unwrap() =
+                                                "❌ Couldn't parse template.".into();
+                                        }
+                                    },
+                                    Err(e) => {
+                                        elog!("ERROR: failed to read template {}: {e}", path.display());
                                         *self.status.lock().unwrap() =
-                                            "❌ Couldn't parse template.".into();
+                                            "❌ Couldn't read template file.".into();
                                     }
                                 }
+                            }
                         });
 
                     ui.add_space(4.0);
@@ -1226,7 +1237,7 @@ impl eframe::App for GUIApp {
                         .map(|p| p.display().to_string())
                         .unwrap_or_default();
 
-                    // --- General ---
+                    // --- general ---
                     frame.show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         ui.label(egui::RichText::new("General").weak().small());
@@ -1251,7 +1262,7 @@ impl eframe::App for GUIApp {
 
                     ui.add_space(4.0);
 
-                    // --- Conflict Resolution ---
+                    // --- conflict resolution ---
                     frame.show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         ui.label(egui::RichText::new("Conflict Resolution").weak().small());
@@ -1276,7 +1287,7 @@ impl eframe::App for GUIApp {
 
                     ui.add_space(4.0);
 
-                    // --- Backup Location & Naming ---
+                    // --- backup location & naming ---
                     frame.show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         ui.label(egui::RichText::new("Backup Location & Naming").weak().small());
@@ -1376,7 +1387,7 @@ impl eframe::App for GUIApp {
                         }
                     });
 
-                    // Apply changes to default backup location
+                    // apply the default backup location change
                     let should_update = match &self.default_backup_location {
                         Some(p) => loc_str != p.display().to_string(),
                         None => !loc_str.is_empty(),
