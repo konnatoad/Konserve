@@ -313,20 +313,23 @@ impl KonserveConfig {
     }
 
     /// Serialize and write the config to disk, creating parent dirs as needed.
-    pub fn save(&self) {
+    pub fn save(&self) -> bool {
         let path = Self::config_path();
         if let Some(dir) = path.parent() {
             let _ = fs::create_dir_all(dir);
         }
 
         match serde_json::to_string_pretty(self) {
-            Ok(json) => {
-                if let Err(e) = fs::write(&path, json) {
+            Ok(json) => match fs::write(&path, json) {
+                Ok(()) => true,
+                Err(e) => {
                     eprintln!("[ERROR] Failed to save config: {e}");
+                    false
                 }
-            }
+            },
             Err(e) => {
                 eprintln!("[ERROR] Failed to serialize config: {e}");
+                false
             }
         }
     }
