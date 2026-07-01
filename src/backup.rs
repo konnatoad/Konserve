@@ -1,5 +1,5 @@
 ﻿//! Creates `.tar` backup archives with embedded `fingerprint.txt` path mappings.
-use crate::helpers::{get_fingered, Progress};
+use crate::helpers::{Progress, get_fingered};
 use crate::{clog, dlog};
 use std::io::BufWriter;
 use std::{
@@ -110,7 +110,18 @@ pub fn backup_gui(
                 dlog!("[DEBUG] Adding single file: {}", original_path.display());
             }
 
-            let metadata = original_path.metadata().map_err(|e| e.to_string())?;
+            let metadata = match original_path.metadata() {
+                Ok(m) => m,
+                Err(e) => {
+                    if skip_locked {
+                        done += 1;
+                        progress.set(done * 100 / total_files);
+                        continue;
+                    }
+                    clog!("ERROR: cannot stat file {}: {e}", original_path.display());
+                    return Err(e.to_string());
+                }
+            };
             let mut header = Header::new_gnu();
             header.set_metadata(&metadata);
             header.set_cksum();
@@ -169,7 +180,16 @@ pub fn backup_gui(
 
         for entry in walk_entries {
             let entry_path = entry.path();
-            let metadata = entry.metadata().map_err(|e| e.to_string())?;
+            let metadata = match entry.metadata() {
+                Ok(m) => m,
+                Err(e) => {
+                    if skip_locked {
+                        continue;
+                    }
+                    clog!("ERROR: cannot stat {}: {e}", entry_path.display());
+                    return Err(e.to_string());
+                }
+            };
 
             let relative_path = match entry_path.strip_prefix(original_path) {
                 Ok(p) => p,
@@ -232,9 +252,11 @@ pub fn backup_gui(
                 if verbose {
                     dlog!("[DEBUG] Adding directory: {}", entry_path.display());
                 }
-                tar_builder
-                    .append_data(&mut header, tar_entry_path, io::empty())
-                    .map_err(|e| e.to_string())?;
+                if let Err(e) = tar_builder.append_data(&mut header, tar_entry_path, io::empty())
+                    && !skip_locked
+                {
+                    return Err(e.to_string());
+                }
             }
         }
     }
