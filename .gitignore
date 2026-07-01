@@ -4,7 +4,6 @@
 /.cargo/
 
 # Lock and config files
-Cargo.lock
 launch.json
 .env
 Konserve.wiki
