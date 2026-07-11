@@ -188,13 +188,16 @@ pub fn exe_dir() -> PathBuf {
         .unwrap_or(PathBuf::from("."))
 }
 
+/// name + pid of a process the Restart Manager found holding a file open
+#[derive(Clone, Debug)]
+pub struct LockingProcess {
+    pub name: String,
+    pub pid: u32,
+}
+
 #[cfg(target_os = "windows")]
-pub fn processes_locking_paths(
-    paths: &[PathBuf],
-    verbose: bool,
-) -> std::collections::HashSet<String> {
-    use std::collections::HashSet;
-    let mut locked_by: HashSet<String> = HashSet::new();
+pub fn processes_locking_paths(paths: &[PathBuf], verbose: bool) -> Vec<LockingProcess> {
+    let mut locked_by: Vec<LockingProcess> = Vec::new();
 
     // restart manager only works on files so flatten folders down to their contents
     let mut files: Vec<PathBuf> = Vec::new();
@@ -297,10 +300,17 @@ pub fn processes_locking_paths(
                     let raw = &info.strAppName;
                     let len = raw.iter().position(|&c| c == 0).unwrap_or(raw.len());
                     let name = String::from_utf16_lossy(&raw[..len]);
+                    let pid = info.Process.dwProcessId;
                     if verbose {
-                        dlog!("[DEBUG] RestartManager: lock held by \"{}\"", name);
+                        dlog!(
+                            "[DEBUG] RestartManager: lock held by \"{}\" (pid {})",
+                            name,
+                            pid
+                        );
                     }
-                    locked_by.insert(name.to_lowercase());
+                    if !locked_by.iter().any(|p: &LockingProcess| p.pid == pid) {
+                        locked_by.push(LockingProcess { name, pid });
+                    }
                 }
             }
         }
@@ -313,11 +323,8 @@ pub fn processes_locking_paths(
 
 // stub for non-windows so main.rs still compiles
 #[cfg(not(target_os = "windows"))]
-pub fn processes_locking_paths(
-    _paths: &[PathBuf],
-    _verbose: bool,
-) -> std::collections::HashSet<String> {
-    std::collections::HashSet::new()
+pub fn processes_locking_paths(_paths: &[PathBuf], _verbose: bool) -> Vec<LockingProcess> {
+    Vec::new()
 }
 
 impl KonserveConfig {
@@ -874,5 +881,22 @@ pub fn kill_process(process_name: &str) -> bool {
 
 #[cfg(not(target_os = "windows"))]
 pub fn kill_process(_process_name: &str) -> bool {
+    false
+}
+
+#[cfg(target_os = "windows")]
+pub fn kill_process_by_pid(pid: u32) -> bool {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    std::process::Command::new("taskkill")
+        .args(["/f", "/pid", &pid.to_string()])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn kill_process_by_pid(_pid: u32) -> bool {
     false
 }
