@@ -154,7 +154,37 @@ pub fn restore_backup(
     }
 
     // counting as we go so we don't have to walk the archive twice
-    let mut total_files: u32 = 1;
+    let mut total_files: u32 = 0;
+    {
+        let mut count_archive = Archive::new(File::open(zip_path).map_err(|e| {
+            let msg = format!(
+                "ERROR: cannot reopen archive for counting {}: {e}",
+                zip_path.display()
+            );
+            elog!("{msg}");
+            msg
+        })?);
+        for entry_res in count_archive.entries().map_err(|e| e.to_string())? {
+            let entry = entry_res.map_err(|e| e.to_string())?;
+            let header_path = entry.path().map_err(|e| e.to_string())?;
+            let path_in_tar = header_path.to_string_lossy().into_owned();
+            if path_in_tar == "fingerprint.txt" {
+                continue;
+            }
+            if selected.is_some()
+                && !to_extract.contains(&path_in_tar)
+                && !to_extract.iter().any(|s| {
+                    path_in_tar.len() > s.len()
+                        && path_in_tar.as_bytes()[s.len()] == b'/'
+                        && path_in_tar.starts_with(s.as_str())
+                })
+            {
+                continue;
+            }
+            total_files += 1;
+        }
+    }
+    let total_files = total_files.max(1);
     let mut done: u32 = 0;
 
     if verbose {
@@ -200,8 +230,6 @@ pub fn restore_backup(
             }
             continue;
         }
-
-        total_files += 1;
 
         let tar_path = Path::new(&path_in_tar);
         let root_component = match tar_path.components().next() {
