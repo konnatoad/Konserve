@@ -222,6 +222,23 @@ pub fn restore_backup(
                 .unwrap_or_else(|_| Path::new(""));
 
             let unpack_to = adjusted_base.join(rel);
+            if entry.header().entry_type().is_dir() {
+                if verbose {
+                    dlog!("[mkdir] {path_in_tar} -> {}", unpack_to.display());
+                }
+                fs::create_dir_all(&unpack_to).map_err(|e| {
+                    let msg = format!(
+                        "ERROR: failed to create directory {}: {e}",
+                        unpack_to.display()
+                    );
+                    elog!("{msg}");
+                    msg
+                })?;
+                restored_count += 1;
+                done += 1;
+                progress.set((done * 100) / total_files);
+                continue;
+            }
             if verbose {
                 dlog!("[write] dir {path_in_tar}  →  {}", unpack_to.display());
             }
