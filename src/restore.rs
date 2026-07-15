@@ -91,7 +91,7 @@ pub fn restore_backup(
     let mut path_map: HashMap<String, PathBuf> = HashMap::new();
     let mut valid_fingerprint = false;
 
-    for entry_res in archive.entries().map_err(|e| e.to_string())? {
+    for entry_res in archive.entries_with_seek().map_err(|e| e.to_string())? {
         let mut entry = entry_res.map_err(|e| e.to_string())?;
         let header_path = entry.path().map_err(|e| e.to_string())?;
         let entry_name = header_path.to_string_lossy();
@@ -164,7 +164,10 @@ pub fn restore_backup(
             elog!("{msg}");
             msg
         })?);
-        for entry_res in count_archive.entries().map_err(|e| e.to_string())? {
+        for entry_res in count_archive
+            .entries_with_seek()
+            .map_err(|e| e.to_string())?
+        {
             let entry = entry_res.map_err(|e| e.to_string())?;
             let header_path = entry.path().map_err(|e| e.to_string())?;
             let path_in_tar = header_path.to_string_lossy().into_owned();
@@ -206,7 +209,7 @@ pub fn restore_backup(
     }
     let mut restored_count = 0;
 
-    for entry_res in archive.entries().map_err(|e| e.to_string())? {
+    for entry_res in archive.entries_with_seek().map_err(|e| e.to_string())? {
         let mut entry = entry_res.map_err(|e| e.to_string())?;
         let tar_path_ref = entry.path().map_err(|e| e.to_string())?;
         let path_in_tar = tar_path_ref.to_string_lossy().into_owned();

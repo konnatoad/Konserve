@@ -360,7 +360,10 @@ impl KonserveConfig {
             Ok(json) => match fs::write(&path, json) {
                 Ok(()) => true,
                 Err(e) => {
-                    write_error_log(&format!("ERROR: failed to save config {}: {e}", path.display()));
+                    write_error_log(&format!(
+                        "ERROR: failed to save config {}: {e}",
+                        path.display()
+                    ));
                     false
                 }
             },
@@ -689,7 +692,7 @@ pub fn parse_fingerprint(
         dlog!("[DEBUG] Scanning for fingerprint.txt…");
     }
 
-    for entry in archive.entries().map_err(|e| e.to_string())? {
+    for entry in archive.entries_with_seek().map_err(|e| e.to_string())? {
         let mut entry = entry.map_err(|e| e.to_string())?;
         let header_path = entry.path().map_err(|e| e.to_string())?;
         let name = header_path.to_string_lossy();
@@ -720,7 +723,7 @@ pub fn parse_fingerprint(
     let mut archive = Archive::new(file);
     let mut entries = Vec::new();
 
-    for entry in archive.entries().map_err(|e| e.to_string())? {
+    for entry in archive.entries_with_seek().map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
         let entry_path = entry.path().map_err(|e| e.to_string())?;
         let entry_name = entry_path.to_string_lossy().into_owned();
