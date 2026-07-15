@@ -90,8 +90,14 @@ const PROTECTED_PROCESSES: &[&str] = &[
 /// something Restart Manager found locking a file we're about to back up:
 /// either one of our tracked KNOWN_APPS, or some other process by name+pid
 enum PendingLock {
-    Known { index: usize, exe_path: Option<PathBuf> },
-    Unknown { name: String, pid: u32 },
+    Known {
+        index: usize,
+        exe_path: Option<PathBuf>,
+    },
+    Unknown {
+        name: String,
+        pid: u32,
+    },
 }
 
 struct ClosedApp {
