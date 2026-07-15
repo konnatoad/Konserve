@@ -1434,7 +1434,7 @@ impl eframe::App for GUIApp {
                         if is_fixed {
                             let resp = ui.horizontal(|ui| {
                                 ui.add(egui::TextEdit::singleline(&mut self.backup_name_input).desired_width(160.0));
-                                ui.weak(format!("→ {}.tar", self.backup_name_input));
+                                ui.weak(format!("-> {}.tar", self.backup_name_input));
                             });
                             if resp.response.changed() {
                                 self.backup_name_mode = BackupNameMode::Fixed(self.backup_name_input.clone());
@@ -1462,7 +1462,7 @@ impl eframe::App for GUIApp {
                                     }
                                 });
                             let preview = Local::now().format(&current_fmt).to_string();
-                            ui.weak(format!("→ backup_{preview}.tar"));
+                            ui.weak(format!("-> backup_{preview}.tar"));
                         }
                     });
 
