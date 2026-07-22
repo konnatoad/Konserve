@@ -71,10 +71,43 @@ const KNOWN_APPS: &[KnownApp] = &[
     },
 ];
 
+/// processes we should never auto-kill even if Restart Manager says they're holding a lock
+const PROTECTED_PROCESSES: &[&str] = &[
+    "explorer.exe",
+    "svchost.exe",
+    "dwm.exe",
+    "csrss.exe",
+    "wininit.exe",
+    "winlogon.exe",
+    "services.exe",
+    "lsass.exe",
+    "smss.exe",
+    "system",
+    "registry",
+    "sihost.exe",
+];
+
+/// something Restart Manager found locking a file we're about to back up:
+/// either one of our tracked KNOWN_APPS, or some other process by name+pid
+enum PendingLock {
+    Known {
+        index: usize,
+        exe_path: Option<PathBuf>,
+    },
+    Unknown {
+        name: String,
+        pid: u32,
+    },
+}
+
 struct ClosedApp {
-    known_index: usize,
-    /// exe path to relaunch after backup, windows only
+    /// Some for a KNOWN_APPS entry (relaunchable), None for an ad-hoc process we killed by pid
+    known_index: Option<usize>,
+    name: String,
+    /// exe path to relaunch after backup, windows only, known apps only
     exe_path: Option<PathBuf>,
+    /// set for ad-hoc (non-KNOWN_APPS) processes, killed by pid instead of by name
+    pid: Option<u32>,
 }
 
 /// backup job waiting on the app-conflict prompt
@@ -82,8 +115,7 @@ struct PendingBackup {
     folders: Vec<PathBuf>,
     out_dir: PathBuf,
     filename: String,
-    /// apps detected running: index into KNOWN_APPS + captured exe path
-    detected: Vec<(usize, Option<PathBuf>)>,
+    detected: Vec<PendingLock>,
 }
 
 /// restore preview result: tree + archive path on success, error string on fail
@@ -93,7 +125,7 @@ type RestoreMsg = Result<(FolderTreeNode, PathBuf), String>;
 type FileDialogMsg = Vec<PathBuf>;
 
 /// result from the background app-detection thread
-type DetectResult = (Vec<(usize, Option<PathBuf>)>, Vec<PathBuf>, PathBuf, String);
+type DetectResult = (Vec<PendingLock>, Vec<PathBuf>, PathBuf, String);
 
 /// saved paths you can reload for later backups
 #[derive(Serialize, Deserialize)]
@@ -261,25 +293,51 @@ impl GUIApp {
 
         let verbose = self.verbose_logging;
         thread::spawn(move || {
-            // ask restart manager what's holding locks on files in the selected folders,
-            // ignore anything not relevant
-            let locked_names = helpers::processes_locking_paths(&folders, verbose);
+            // ask restart manager what's holding locks on files in the selected folders
+            let locked = helpers::processes_locking_paths(&folders, verbose);
 
             let process_names: Vec<&'static str> = KNOWN_APPS.iter().map(|a| a.process).collect();
+            let own_pid = std::process::id();
 
-            // only keep apps that are both running and actually locking something we're backing up
-            let detected = helpers::detect_known_processes(&process_names)
-                .into_iter()
-                .filter(|(i, _)| {
-                    let exe_stem = KNOWN_APPS[*i]
-                        .process
-                        .trim_end_matches(".exe")
-                        .to_lowercase();
-                    locked_names.iter().any(|locked| {
-                        locked.contains(&exe_stem) || exe_stem.contains(locked.as_str())
-                    })
-                })
-                .collect::<Vec<_>>();
+            let mut detected: Vec<PendingLock> = Vec::new();
+            let mut matched_pids: std::collections::HashSet<u32> = std::collections::HashSet::new();
+
+            // known apps first, so we can show their friendly name and relaunch them afterwards
+            for (i, exe_path) in helpers::detect_known_processes(&process_names) {
+                let exe_stem = KNOWN_APPS[i]
+                    .process
+                    .trim_end_matches(".exe")
+                    .to_lowercase();
+                let locking = locked.iter().any(|p| {
+                    let n = p.name.to_lowercase();
+                    n.contains(&exe_stem) || exe_stem.contains(n.as_str())
+                });
+                if locking {
+                    for p in &locked {
+                        let n = p.name.to_lowercase();
+                        if n.contains(&exe_stem) || exe_stem.contains(n.as_str()) {
+                            matched_pids.insert(p.pid);
+                        }
+                    }
+                    detected.push(PendingLock::Known { index: i, exe_path });
+                }
+            }
+
+            // anything else Restart Manager flagged as a locker: still surface it so it can be
+            // closed too, instead of silently dropping the backup on an app we don't track
+            for p in &locked {
+                if matched_pids.contains(&p.pid) || p.pid == own_pid {
+                    continue;
+                }
+                if PROTECTED_PROCESSES.contains(&p.name.to_lowercase().as_str()) {
+                    // never offer to kill core OS processes; those files just get skipped later
+                    continue;
+                }
+                detected.push(PendingLock::Unknown {
+                    name: p.name.clone(),
+                    pid: p.pid,
+                });
+            }
 
             let _ = tx.send((detected, folders, out_dir, filename));
         });
@@ -309,15 +367,24 @@ impl GUIApp {
             .spawn(move || {
                 let mut actually_closed: Vec<ClosedApp> = Vec::new();
                 for app in apps {
-                    let proc = KNOWN_APPS[app.known_index].process;
-                    if helpers::kill_process(proc) {
+                    let killed = match (app.known_index, app.pid) {
+                        (Some(idx), _) => helpers::kill_process(KNOWN_APPS[idx].process),
+                        (None, Some(pid)) => helpers::kill_process_by_pid(pid),
+                        (None, None) => false,
+                    };
+                    if killed {
                         actually_closed.push(app);
+                    } else {
+                        elog!("ERROR: failed to close {} before backup", app.name);
                     }
                 }
                 std::thread::sleep(std::time::Duration::from_millis(800));
 
                 set_status(&status, "Packing into .tar");
-                match backup_gui(&folders, &out_dir, &filename, &progress, verbose, false) {
+                // skip_locked=true: we just did our best to close everything holding a lock,
+                // but a stray file we couldn't (or shouldn't, see PROTECTED_PROCESSES) close
+                // shouldn't abort the whole backup
+                match backup_gui(&folders, &out_dir, &filename, &progress, verbose, true) {
                     Ok(path) => {
                         set_status(&status, format!("✅ Backup created:\n{}", path.display()));
                     }
@@ -447,17 +514,31 @@ impl eframe::App for GUIApp {
             if let Some(ref pending) = self.pending_backup {
                 ui.separator();
                 ui.colored_label(egui::Color32::YELLOW, "⚠ The following apps may be locking files:");
-                for &(i, _) in &pending.detected {
-                    ui.label(format!("  • {}", KNOWN_APPS[i].name));
+                for lock in &pending.detected {
+                    let name = match lock {
+                        PendingLock::Known { index, .. } => KNOWN_APPS[*index].name,
+                        PendingLock::Unknown { name, .. } => name.as_str(),
+                    };
+                    ui.label(format!("  • {name}"));
                 }
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     if ui.button("Close apps & backup").clicked() {
                         let pending = self.pending_backup.take().unwrap();
                         let apps: Vec<ClosedApp> = pending.detected.iter()
-                            .map(|&(i, ref path)| ClosedApp {
-                                known_index: i,
-                                exe_path: path.clone(),
+                            .map(|lock| match lock {
+                                PendingLock::Known { index, exe_path } => ClosedApp {
+                                    known_index: Some(*index),
+                                    name: KNOWN_APPS[*index].name.to_string(),
+                                    exe_path: exe_path.clone(),
+                                    pid: None,
+                                },
+                                PendingLock::Unknown { name, pid } => ClosedApp {
+                                    known_index: None,
+                                    name: name.clone(),
+                                    exe_path: None,
+                                    pid: Some(*pid),
+                                },
                             })
                             .collect();
                         self.start_backup_after_kill(pending.folders, pending.out_dir, pending.filename, apps);
@@ -478,8 +559,12 @@ impl eframe::App for GUIApp {
                 ui.separator();
                 ui.colored_label(egui::Color32::LIGHT_BLUE, "Backup finished. Relaunch apps?");
                 for app in &self.closed_apps {
-                    let note = if app.exe_path.is_some() { "" } else { "Can't determine installation path" };
-                    ui.label(format!("  • {}{}", KNOWN_APPS[app.known_index].name, note));
+                    let note = if app.known_index.is_some() && app.exe_path.is_none() {
+                        " (can't determine installation path)"
+                    } else {
+                        ""
+                    };
+                    ui.label(format!("  • {}{}", app.name, note));
                 }
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
@@ -489,7 +574,7 @@ impl eframe::App for GUIApp {
         if let Some(path) = &app.exe_path
              && let Err(e) = std::process::Command::new(path).spawn() {
                  elog!("ERROR: failed to relaunch {}: {e}", path.display());
-                 failed.push(KNOWN_APPS[app.known_index].name);
+                 failed.push(app.name.clone());
              }
     }
     if failed.is_empty() {
@@ -526,18 +611,36 @@ impl eframe::App for GUIApp {
                         }
                         self.conflict_file = None;
                     }
+                        if ui.button("Overwrite All").clicked() {
+                            if let Some(tx) = &self.conflict_answer_tx {
+                                let _ = tx.send(ConflictAnswer::OverwriteAll);
+                            }
+                            self.conflict_file = None;
+                        }
                     if ui.button("Skip").clicked() {
                         if let Some(tx) = &self.conflict_answer_tx {
                             let _ = tx.send(ConflictAnswer::Skip);
                         }
                         self.conflict_file = None;
                     }
+                        if ui.button("Skip All").clicked() {
+                            if let Some(tx) = &self.conflict_answer_tx {
+                                let _ = tx.send(ConflictAnswer::SkipAll);
+                            }
+                            self.conflict_file = None;
+                        }
                     if ui.button("Rename").clicked() {
                         if let Some(tx) = &self.conflict_answer_tx {
                             let _ = tx.send(ConflictAnswer::Rename);
                         }
                         self.conflict_file = None;
                     }
+                        if ui.button("Rename All").clicked() {
+                            if let Some(tx) = &self.conflict_answer_tx {
+                                let _ = tx.send(ConflictAnswer::RenameAll);
+                            }
+                            self.conflict_file = None;
+                        }
                 });
                 ui.separator();
                 ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
@@ -1355,7 +1458,7 @@ impl eframe::App for GUIApp {
                         if is_fixed {
                             let resp = ui.horizontal(|ui| {
                                 ui.add(egui::TextEdit::singleline(&mut self.backup_name_input).desired_width(160.0));
-                                ui.weak(format!("→ {}.tar", self.backup_name_input));
+                                ui.weak(format!("-> {}.tar", self.backup_name_input));
                             });
                             if resp.response.changed() {
                                 self.backup_name_mode = BackupNameMode::Fixed(self.backup_name_input.clone());
@@ -1383,7 +1486,7 @@ impl eframe::App for GUIApp {
                                     }
                                 });
                             let preview = Local::now().format(&current_fmt).to_string();
-                            ui.weak(format!("→ backup_{preview}.tar"));
+                            ui.weak(format!("-> backup_{preview}.tar"));
                         }
                     });
 

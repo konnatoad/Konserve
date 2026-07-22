@@ -13,6 +13,16 @@ use tar::Archive;
 /// what the user picked when a restore hits a conflict, sent back from the ui
 pub enum ConflictAnswer {
     Overwrite,
+    OverwriteAll,
+    Skip,
+    SkipAll,
+    Rename,
+    RenameAll,
+}
+
+#[derive(Clone, Copy)]
+enum StickyChoice {
+    Overwrite,
     Skip,
     Rename,
 }
@@ -22,9 +32,17 @@ fn resolve_conflict(
     dest: &Path,
     mode: ConflictResolutionMode,
     ch: &Option<(mpsc::Sender<PathBuf>, mpsc::Receiver<ConflictAnswer>)>,
+    sticky: &mut Option<StickyChoice>,
 ) -> Option<PathBuf> {
     if !dest.exists() {
         return Some(dest.to_path_buf());
+    }
+    if let Some(choice) = sticky {
+        return match choice {
+            StickyChoice::Overwrite => Some(dest.to_path_buf()),
+            StickyChoice::Skip => None,
+            StickyChoice::Rename => Some(unique_path(dest)),
+        };
     }
     match mode {
         ConflictResolutionMode::Overwrite => Some(dest.to_path_buf()),
@@ -37,8 +55,20 @@ fn resolve_conflict(
                 }
                 match rx.recv() {
                     Ok(ConflictAnswer::Overwrite) => Some(dest.to_path_buf()),
+                    Ok(ConflictAnswer::OverwriteAll) => {
+                        *sticky = Some(StickyChoice::Overwrite);
+                        Some(dest.to_path_buf())
+                    }
                     Ok(ConflictAnswer::Skip) => None,
+                    Ok(ConflictAnswer::SkipAll) => {
+                        *sticky = Some(StickyChoice::Skip);
+                        None
+                    }
                     Ok(ConflictAnswer::Rename) => Some(unique_path(dest)),
+                    Ok(ConflictAnswer::RenameAll) => {
+                        *sticky = Some(StickyChoice::Rename);
+                        Some(unique_path(dest))
+                    }
                     Err(_) => None,
                 }
             } else {
@@ -91,7 +121,7 @@ pub fn restore_backup(
     let mut path_map: HashMap<String, PathBuf> = HashMap::new();
     let mut valid_fingerprint = false;
 
-    for entry_res in archive.entries().map_err(|e| e.to_string())? {
+    for entry_res in archive.entries_with_seek().map_err(|e| e.to_string())? {
         let mut entry = entry_res.map_err(|e| e.to_string())?;
         let header_path = entry.path().map_err(|e| e.to_string())?;
         let entry_name = header_path.to_string_lossy();
@@ -154,7 +184,40 @@ pub fn restore_backup(
     }
 
     // counting as we go so we don't have to walk the archive twice
-    let mut total_files: u32 = 1;
+    let mut total_files: u32 = 0;
+    {
+        let mut count_archive = Archive::new(File::open(zip_path).map_err(|e| {
+            let msg = format!(
+                "ERROR: cannot reopen archive for counting {}: {e}",
+                zip_path.display()
+            );
+            elog!("{msg}");
+            msg
+        })?);
+        for entry_res in count_archive
+            .entries_with_seek()
+            .map_err(|e| e.to_string())?
+        {
+            let entry = entry_res.map_err(|e| e.to_string())?;
+            let header_path = entry.path().map_err(|e| e.to_string())?;
+            let path_in_tar = header_path.to_string_lossy().into_owned();
+            if path_in_tar == "fingerprint.txt" {
+                continue;
+            }
+            if selected.is_some()
+                && !to_extract.contains(&path_in_tar)
+                && !to_extract.iter().any(|s| {
+                    path_in_tar.len() > s.len()
+                        && path_in_tar.as_bytes()[s.len()] == b'/'
+                        && path_in_tar.starts_with(s.as_str())
+                })
+            {
+                continue;
+            }
+            total_files += 1;
+        }
+    }
+    let total_files = total_files.max(1);
     let mut done: u32 = 0;
 
     if verbose {
@@ -175,8 +238,9 @@ pub fn restore_backup(
         dlog!("[extract] scanning archive…");
     }
     let mut restored_count = 0;
+    let mut sticky: Option<StickyChoice> = None;
 
-    for entry_res in archive.entries().map_err(|e| e.to_string())? {
+    for entry_res in archive.entries_with_seek().map_err(|e| e.to_string())? {
         let mut entry = entry_res.map_err(|e| e.to_string())?;
         let tar_path_ref = entry.path().map_err(|e| e.to_string())?;
         let path_in_tar = tar_path_ref.to_string_lossy().into_owned();
@@ -201,8 +265,6 @@ pub fn restore_backup(
             continue;
         }
 
-        total_files += 1;
-
         let tar_path = Path::new(&path_in_tar);
         let root_component = match tar_path.components().next() {
             Some(c) => c.as_os_str().to_string_lossy().into_owned(),
@@ -222,11 +284,29 @@ pub fn restore_backup(
                 .unwrap_or_else(|_| Path::new(""));
 
             let unpack_to = adjusted_base.join(rel);
+            if entry.header().entry_type().is_dir() {
+                if verbose {
+                    dlog!("[mkdir] {path_in_tar} -> {}", unpack_to.display());
+                }
+                fs::create_dir_all(&unpack_to).map_err(|e| {
+                    let msg = format!(
+                        "ERROR: failed to create directory {}: {e}",
+                        unpack_to.display()
+                    );
+                    elog!("{msg}");
+                    msg
+                })?;
+                restored_count += 1;
+                done += 1;
+                progress.set((done * 100) / total_files);
+                continue;
+            }
             if verbose {
                 dlog!("[write] dir {path_in_tar}  →  {}", unpack_to.display());
             }
 
-            if let Some(final_path) = resolve_conflict(&unpack_to, mode, &conflict_ch) {
+            if let Some(final_path) = resolve_conflict(&unpack_to, mode, &conflict_ch, &mut sticky)
+            {
                 if let Some(dir) = final_path.parent() {
                     fs::create_dir_all(dir).map_err(|e| {
                         let msg = format!("ERROR: failed to create dir {}: {e}", dir.display());
@@ -260,7 +340,9 @@ pub fn restore_backup(
                     dlog!("[write] file {path_in_tar}  →  {}", unpack_to.display());
                 }
 
-                if let Some(final_path) = resolve_conflict(&unpack_to, mode, &conflict_ch) {
+                if let Some(final_path) =
+                    resolve_conflict(&unpack_to, mode, &conflict_ch, &mut sticky)
+                {
                     if let Some(dir) = final_path.parent() {
                         fs::create_dir_all(dir).map_err(|e| {
                             let msg = format!("ERROR: failed to create dir {}: {e}", dir.display());
