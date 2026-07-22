@@ -13,6 +13,16 @@ use tar::Archive;
 /// what the user picked when a restore hits a conflict, sent back from the ui
 pub enum ConflictAnswer {
     Overwrite,
+    OverwriteAll,
+    Skip,
+    SkipAll,
+    Rename,
+    RenameAll,
+}
+
+#[derive(Clone, Copy)]
+enum StickyChoice {
+    Overwrite,
     Skip,
     Rename,
 }
@@ -22,9 +32,17 @@ fn resolve_conflict(
     dest: &Path,
     mode: ConflictResolutionMode,
     ch: &Option<(mpsc::Sender<PathBuf>, mpsc::Receiver<ConflictAnswer>)>,
+    sticky: &mut Option<StickyChoice>,
 ) -> Option<PathBuf> {
     if !dest.exists() {
         return Some(dest.to_path_buf());
+    }
+    if let Some(choice) = sticky {
+        return match choice {
+            StickyChoice::Overwrite => Some(dest.to_path_buf()),
+            StickyChoice::Skip => None,
+            StickyChoice::Rename => Some(unique_path(dest)),
+        };
     }
     match mode {
         ConflictResolutionMode::Overwrite => Some(dest.to_path_buf()),
@@ -37,8 +55,20 @@ fn resolve_conflict(
                 }
                 match rx.recv() {
                     Ok(ConflictAnswer::Overwrite) => Some(dest.to_path_buf()),
+                    Ok(ConflictAnswer::OverwriteAll) => {
+                        *sticky = Some(StickyChoice::Overwrite);
+                        Some(dest.to_path_buf())
+                    }
                     Ok(ConflictAnswer::Skip) => None,
+                    Ok(ConflictAnswer::SkipAll) => {
+                        *sticky = Some(StickyChoice::Skip);
+                        None
+                    }
                     Ok(ConflictAnswer::Rename) => Some(unique_path(dest)),
+                    Ok(ConflictAnswer::RenameAll) => {
+                        *sticky = Some(StickyChoice::Rename);
+                        Some(unique_path(dest))
+                    }
                     Err(_) => None,
                 }
             } else {
@@ -208,6 +238,7 @@ pub fn restore_backup(
         dlog!("[extract] scanning archive…");
     }
     let mut restored_count = 0;
+    let mut sticky: Option<StickyChoice> = None;
 
     for entry_res in archive.entries_with_seek().map_err(|e| e.to_string())? {
         let mut entry = entry_res.map_err(|e| e.to_string())?;
@@ -274,7 +305,8 @@ pub fn restore_backup(
                 dlog!("[write] dir {path_in_tar}  →  {}", unpack_to.display());
             }
 
-            if let Some(final_path) = resolve_conflict(&unpack_to, mode, &conflict_ch) {
+            if let Some(final_path) = resolve_conflict(&unpack_to, mode, &conflict_ch, &mut sticky)
+            {
                 if let Some(dir) = final_path.parent() {
                     fs::create_dir_all(dir).map_err(|e| {
                         let msg = format!("ERROR: failed to create dir {}: {e}", dir.display());
@@ -308,7 +340,9 @@ pub fn restore_backup(
                     dlog!("[write] file {path_in_tar}  →  {}", unpack_to.display());
                 }
 
-                if let Some(final_path) = resolve_conflict(&unpack_to, mode, &conflict_ch) {
+                if let Some(final_path) =
+                    resolve_conflict(&unpack_to, mode, &conflict_ch, &mut sticky)
+                {
                     if let Some(dir) = final_path.parent() {
                         fs::create_dir_all(dir).map_err(|e| {
                             let msg = format!("ERROR: failed to create dir {}: {e}", dir.display());

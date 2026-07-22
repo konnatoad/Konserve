@@ -611,18 +611,36 @@ impl eframe::App for GUIApp {
                         }
                         self.conflict_file = None;
                     }
+                        if ui.button("Overwrite All").clicked() {
+                            if let Some(tx) = &self.conflict_answer_tx {
+                                let _ = tx.send(ConflictAnswer::OverwriteAll);
+                            }
+                            self.conflict_file = None;
+                        }
                     if ui.button("Skip").clicked() {
                         if let Some(tx) = &self.conflict_answer_tx {
                             let _ = tx.send(ConflictAnswer::Skip);
                         }
                         self.conflict_file = None;
                     }
+                        if ui.button("Skip All").clicked() {
+                            if let Some(tx) = &self.conflict_answer_tx {
+                                let _ = tx.send(ConflictAnswer::SkipAll);
+                            }
+                            self.conflict_file = None;
+                        }
                     if ui.button("Rename").clicked() {
                         if let Some(tx) = &self.conflict_answer_tx {
                             let _ = tx.send(ConflictAnswer::Rename);
                         }
                         self.conflict_file = None;
                     }
+                        if ui.button("Rename All").clicked() {
+                            if let Some(tx) = &self.conflict_answer_tx {
+                                let _ = tx.send(ConflictAnswer::RenameAll);
+                            }
+                            self.conflict_file = None;
+                        }
                 });
                 ui.separator();
                 ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
