@@ -985,11 +985,9 @@ impl eframe::App for GUIApp {
                     if zone_hovering {
                         ui.ctx().request_repaint();
                     }
-                    let dropped_paths: Vec<PathBuf> = ui.ctx().input(|i| {
-                        i.raw.dropped_files.iter()
-                            .filter_map(|f| f.path.clone())
-                            .collect()
-                    });
+                        let dropped_paths: Vec<PathBuf> = ui.ctx().input(|i| {
+                            i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect()
+                        });
                     if !dropped_paths.is_empty() {
                         self.selected_folders.extend(dropped_paths);
                         self.selected_folders.sort();
