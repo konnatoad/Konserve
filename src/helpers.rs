@@ -140,6 +140,7 @@ pub fn set_status(status: &Mutex<String>, msg: impl Into<String>) {
 
 /// prints to stdout and timestamps into the log file
 pub fn write_dlog(msg: &str) {
+    let msg = redact(msg);
     println!("{msg}");
     if let Ok(mut guard) = DEBUG_LOG.lock()
         && let Some(ref mut f) = *guard
@@ -147,6 +148,24 @@ pub fn write_dlog(msg: &str) {
         let ts = Local::now().format("%Y-%m-%d %H:%M:%S");
         let _ = writeln!(f, "[{ts}] {msg}");
     }
+}
+fn redact(msg: &str) -> String {
+    let lower = msg.to_ascii_lowercase();
+    let mut out = String::with_capacity(msg.len());
+    let mut cursor = 0;
+    while let Some(hit) = lower[cursor..].find("c:\\users\\") {
+        let start = cursor + hit;
+        let name_start = start + "c:\\users\\".len();
+        let name_end = msg[name_start..]
+            .find('\\')
+            .map(|d| name_start + d)
+            .unwrap_or(msg.len());
+        out.push_str(&msg[cursor..start]);
+        out.push_str("C:\\Users\\<user>");
+        cursor = name_end;
+    }
+    out.push_str(&msg[cursor..]);
+    out
 }
 
 #[macro_export]
