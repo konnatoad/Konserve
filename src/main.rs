@@ -4,6 +4,7 @@
 mod backup;
 mod helpers;
 mod restore;
+mod theme;
 
 use backup::backup_gui;
 use helpers::BackupNameMode;
@@ -158,7 +159,7 @@ fn main() -> Result<(), eframe::Error> {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([460.0, 600.0])
+            .with_inner_size([470.0, 602.0])
             .with_resizable(false)
             .with_icon(icon),
         ..Default::default()
@@ -167,7 +168,10 @@ fn main() -> Result<(), eframe::Error> {
     let result = eframe::run_native(
         "Konserve",
         options,
-        Box::new(|_cc| Ok(Box::new(GUIApp::default()))),
+        Box::new(|cc| {
+            theme::install(&cc.egui_ctx);
+            Ok(Box::new(GUIApp::default()))
+        }),
     );
 
     if let Err(ref e) = result {
@@ -225,6 +229,9 @@ struct GUIApp {
     relaunch_rx: Option<mpsc::Receiver<Vec<ClosedApp>>>,
     config: helpers::KonserveConfig,
     drop_zone_rect: Option<egui::Rect>,
+    // last frame's measured height of the Home footer (buttons + progress + status),
+    // used to stretch the drop zone so it fills the window with no dead space
+    footer_height: f32,
 }
 
 impl Default for GUIApp {
@@ -271,6 +278,7 @@ impl Default for GUIApp {
             relaunch_rx: None,
             config,
             drop_zone_rect: None,
+            footer_height: 150.0,
         };
         if app.verbose_logging {
             helpers::init_verbose_log();
@@ -442,25 +450,31 @@ impl GUIApp {
 impl eframe::App for GUIApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         egui::Frame::new()
-            .inner_margin(egui::Margin::symmetric(8, 4))
+            .fill(ui.visuals().panel_fill)
+            .inner_margin(egui::Margin::symmetric(10, 6))
             .show(ui, |ui| {
             ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.add_space(4.0);
-                for (label, tab) in [("Home", MainTab::Home), ("Settings", MainTab::Settings)] {
-                    let active = self.tab == tab;
-                    let text = if active {
-                        egui::RichText::new(label).strong()
-                    } else {
-                        egui::RichText::new(label)
-                    };
-                    if ui.selectable_label(active, text).clicked() {
-                        self.tab = tab;
-                        *self.status.lock().unwrap() = String::new();
-                    }
-                }
-            });
-            ui.add_space(2.0);
+            egui::Frame::new()
+                .fill(ui.visuals().faint_bg_color)
+                .corner_radius(8.0)
+                .inner_margin(egui::Margin::same(3))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        for (label, tab) in [("Home", MainTab::Home), ("Settings", MainTab::Settings)] {
+                            let active = self.tab == tab;
+                            let text = if active {
+                                egui::RichText::new(label).strong()
+                            } else {
+                                egui::RichText::new(label)
+                            };
+                            if ui.selectable_label(active, text).clicked() {
+                                self.tab = tab;
+                                *self.status.lock().unwrap() = String::new();
+                            }
+                        }
+                    });
+                });
+            ui.add_space(6.0);
 
             // overwrite confirm for fixed backup names
             if let Some(ref dest) = self.overwrite_confirm.clone() {
@@ -902,7 +916,7 @@ impl eframe::App for GUIApp {
                     egui::Frame::new()
                         .fill(ui.visuals().faint_bg_color)
                         .corner_radius(6.0)
-                        .inner_margin(egui::Margin::symmetric(6, 4))
+                        .inner_margin(egui::Margin::symmetric(8, 6))
                         .show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         ui.horizontal(|ui| {
@@ -993,25 +1007,27 @@ impl eframe::App for GUIApp {
                         self.selected_folders.sort();
                         self.selected_folders.dedup();
                     }
-                    // selected paths card
+                    // selected paths card — stretches to fill the space above the footer
                     let stroke = if zone_hovering {
-                        egui::Stroke::new(2.0, egui::Color32::from_rgb(80, 160, 240))
+                        egui::Stroke::new(2.0, theme::ACCENT_HOVER)
                     } else {
                         ui.visuals().widgets.noninteractive.bg_stroke
                     };
+                    let fill_h = (ui.available_height() - self.footer_height).max(120.0);
 
                     let drop_zone = egui::Frame::new()
+                        .fill(egui::Color32::from_gray(22))
                         .stroke(stroke)
                         .corner_radius(6.0)
-                        .inner_margin(egui::Margin::symmetric(6, 4))
+                        .inner_margin(egui::Margin::symmetric(8, 6))
                         .show(ui, |ui| {
                             ui.set_width(ui.available_width());
+                            ui.set_min_height(fill_h - 12.0);
                             if self.selected_folders.is_empty() {
                                 ui.vertical_centered(|ui| {
-                                    ui.add_space(18.0);
-                                        ui.weak("No files or folders selected.");
-                                        ui.weak("Use Add Folders or Add Files above, or drag and drop here.");
-                                    ui.add_space(18.0);
+                                    ui.add_space(((fill_h - 48.0) / 2.0).max(12.0));
+                                    ui.weak("No files or folders selected.");
+                                    ui.weak("Use Add Folders or Add Files above, or drag and drop here.");
                                 });
                             } else {
                                 ui.horizontal(|ui| {
@@ -1025,7 +1041,7 @@ impl eframe::App for GUIApp {
                                 ui.separator();
                                 let mut to_remove = None;
                                 egui::ScrollArea::vertical()
-                                    .max_height(200.0)
+                                    .max_height((fill_h - 56.0).max(80.0))
                                     .show(ui, |ui| {
                                         ui.set_width(ui.available_width());
                                         for (i, path) in self.selected_folders.iter().enumerate() {
@@ -1047,6 +1063,10 @@ impl eframe::App for GUIApp {
                         });
 
                     self.drop_zone_rect = Some(drop_zone.response.rect);
+
+                    // everything below is the "footer" — measure its height so next
+                    // frame's drop zone can reserve exactly that much and leave no gap
+                    let footer_top = ui.min_rect().bottom();
 
                     ui.add_space(2.0);
 
@@ -1147,8 +1167,7 @@ impl eframe::App for GUIApp {
                         });
                         ui.vertical(|ui| {
                             let btn_size = egui::vec2(115.0, 24.0);
-                            ui.add_sized(btn_size, egui::Button::new("Create Backup")
-                                .fill(egui::Color32::from_rgb(40, 100, 180)))
+                            ui.add_sized(btn_size, theme::primary_button("Create Backup"))
                                 .clicked()
                                 .then(|| {
                                     let folders = self.selected_folders.clone();
@@ -1245,7 +1264,8 @@ impl eframe::App for GUIApp {
                                 0..=100 => {
                                     ui.add(
                                         egui::ProgressBar::new((p.get() as f32) / 100.0)
-                                            .fill(egui::Color32::from_rgb(80, 160, 240))
+                                            .fill(theme::ACCENT)
+                                            .corner_radius(3.0)
                                             .desired_height(6.0)
                                             .animate(true)
                                             .desired_width(ui.available_width()),
@@ -1270,13 +1290,15 @@ impl eframe::App for GUIApp {
                     ui.add_space(2.0);
                     egui::Frame::new()
                         .fill(ui.visuals().extreme_bg_color)
-                        .corner_radius(4.0)
-                        .inner_margin(egui::Margin::symmetric(8, 4))
+                        .corner_radius(6.0)
+                        .inner_margin(egui::Margin::symmetric(8, 6))
                         .show(ui, |ui| {
                             ui.set_width(ui.available_width());
                             let status_text = self.status.lock().unwrap_or_else(|e| e.into_inner()).clone();
                             ui.label(status_text.as_str());
                         });
+
+                    self.footer_height = (ui.min_rect().bottom() - footer_top).max(0.0);
                 }
 
                 MainTab::Settings => {
@@ -1288,7 +1310,7 @@ impl eframe::App for GUIApp {
                     });
                     ui.separator();
 
-                    let btn_size = egui::vec2(95.0, 17.0);
+                    let btn_size = egui::vec2(120.0, 24.0);
                     ui.add_sized(btn_size, egui::Button::new("Edit Template"))
                         .clicked()
                         .then(|| {
@@ -1503,8 +1525,7 @@ impl eframe::App for GUIApp {
                     ui.add_space(4.0);
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                        if ui.add(egui::Button::new("  Save  ")
-                            .fill(egui::Color32::from_rgb(40, 100, 180)))
+                        if ui.add_sized([96.0, 26.0], theme::primary_button("Save"))
                             .clicked()
                         {
                             self.config.verbose_logging = self.verbose_logging;
