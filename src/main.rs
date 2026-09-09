@@ -102,16 +102,12 @@ enum PendingLock {
 }
 
 struct ClosedApp {
-    /// Some for a KNOWN_APPS entry (relaunchable), None for an ad-hoc process we killed by pid
     known_index: Option<usize>,
     name: String,
-    /// exe path to relaunch after backup, windows only, known apps only
     exe_path: Option<PathBuf>,
-    /// set for ad-hoc (non-KNOWN_APPS) processes, killed by pid instead of by name
     pid: Option<u32>,
 }
 
-/// backup job waiting on the app-conflict prompt
 struct PendingBackup {
     folders: Vec<PathBuf>,
     out_dir: PathBuf,
@@ -119,22 +115,17 @@ struct PendingBackup {
     detected: Vec<PendingLock>,
 }
 
-/// restore preview result: tree + archive path on success, error string on fail
 type RestoreMsg = Result<(FolderTreeNode, PathBuf), String>;
 
-/// paths back from a background file dialog
 type FileDialogMsg = Vec<PathBuf>;
 
-/// result from the background app-detection thread
 type DetectResult = (Vec<PendingLock>, Vec<PathBuf>, PathBuf, String);
 
-/// saved paths you can reload for later backups
 #[derive(Serialize, Deserialize)]
 struct BackupTemplate {
     paths: Vec<PathBuf>,
 }
 
-/// one node in the restore tree, either a file or a folder with kids
 #[derive(Default)]
 struct FolderTreeNode {
     children: HashMap<String, FolderTreeNode>,
@@ -191,8 +182,6 @@ enum MainTab {
     Settings,
 }
 
-/// segmented tab switcher with an accent pill that slides to the active tab.
-/// returns true if the selection changed this frame.
 fn animated_tab_bar(ui: &mut egui::Ui, current: &mut MainTab) -> bool {
     const TABS: [(&str, MainTab); 2] = [("Home", MainTab::Home), ("Settings", MainTab::Settings)];
     let active_idx = TABS.iter().position(|(_, t)| t == current).unwrap_or(0);
@@ -218,7 +207,6 @@ fn animated_tab_bar(ui: &mut egui::Ui, current: &mut MainTab) -> bool {
                 .unwrap_or(egui::FontId::proportional(13.0));
 
             ui.horizontal(|ui| {
-                // reserve a slot so the sliding pill paints behind the labels
                 let pill = ui.painter().add(egui::Shape::Noop);
                 let mut first_rect: Option<egui::Rect> = None;
                 let mut step = 0.0_f32;
@@ -425,7 +413,6 @@ impl GUIApp {
                     continue;
                 }
                 if PROTECTED_PROCESSES.contains(&p.name.to_lowercase().as_str()) {
-                    // never offer to kill core OS processes; those files just get skipped later
                     continue;
                 }
                 detected.push(PendingLock::Unknown {
@@ -438,7 +425,6 @@ impl GUIApp {
         });
     }
 
-    /// kills apps, waits for them to exit, then starts the backup, all on a background thread
     fn start_backup_after_kill(
         &mut self,
         folders: Vec<PathBuf>,
@@ -476,9 +462,6 @@ impl GUIApp {
                 std::thread::sleep(std::time::Duration::from_millis(800));
 
                 set_status(&status, "Packing into .tar");
-                // skip_locked=true: we just did our best to close everything holding a lock,
-                // but a stray file we couldn't (or shouldn't, see PROTECTED_PROCESSES) close
-                // shouldn't abort the whole backup
                 match backup_gui(&folders, &out_dir, &filename, &progress, verbose, true) {
                     Ok(path) => {
                         set_status(&status, format!("✅ Backup created:\n{}", path.display()));
@@ -494,7 +477,6 @@ impl GUIApp {
             .expect("failed to spawn backup thread");
     }
 
-    /// spawns the backup thread, called once the app-conflict prompt is resolved
     fn start_backup(
         &mut self,
         folders: Vec<PathBuf>,
@@ -546,7 +528,6 @@ impl eframe::App for GUIApp {
             }
             ui.add_space(6.0);
 
-            // overwrite confirm for fixed backup names
             if let Some(ref dest) = self.overwrite_confirm.clone() {
                 ui.separator();
                 ui.colored_label(egui::Color32::YELLOW, format!("⚠ '{}' already exists. Overwrite?", dest.file_name().unwrap_or_default().to_string_lossy()));
@@ -594,7 +575,6 @@ impl eframe::App for GUIApp {
                 ui.separator();
             }
 
-            // app-conflict prompt
             if let Some(ref pending) = self.pending_backup {
                 ui.separator();
                 ui.colored_label(egui::Color32::YELLOW, "⚠ The following apps may be locking files:");
@@ -900,7 +880,6 @@ impl eframe::App for GUIApp {
             ui.set_opacity(0.3 + 0.7 * tab_fade);
             match self.tab {
                 MainTab::Home => {
-                    // poll the detect-apps thread
                     if let Some((detected, folders, out_dir, filename)) =
                         self.detect_rx.as_ref().and_then(|rx| rx.try_recv().ok())
                     {
@@ -931,7 +910,6 @@ impl eframe::App for GUIApp {
                         }
                     }
 
-                    // handle the restore preview thread's result
                     if let Some(finished_msg) =
                         self.restore_rx.as_ref().and_then(|rx| rx.try_recv().ok())
                     {
@@ -1142,15 +1120,12 @@ impl eframe::App for GUIApp {
 
                     self.drop_zone_rect = Some(drop_zone.response.rect);
 
-                    // everything below is the "footer" — measure its height so next
-                    // frame's drop zone can reserve exactly that much and leave no gap
                     let footer_top = ui.min_rect().bottom();
 
                     ui.add_space(2.0);
 
                     ui.separator();
 
-                    // template + action buttons
                     ui.horizontal(|ui| {
                         ui.vertical(|ui| {
                             let btn_size = egui::vec2(110.0, 24.0);
@@ -1183,7 +1158,6 @@ impl eframe::App for GUIApp {
                                                     let msg = if skipped.is_empty() {
                                                         "✅ Template loaded".into()
                                                     } else {
-                                                        // tell them how many got skipped
                                                         format!(
                                                             "✅ Loaded with {} paths skipped",
                                                             skipped.len()
@@ -1438,8 +1412,6 @@ impl eframe::App for GUIApp {
                         .map(|p| p.display().to_string())
                         .unwrap_or_default();
 
-                    // sections scroll if they outgrow the window (e.g. when the
-                    // conflict-resolution combo appears); Save stays pinned below
                     let sections_max_h = (ui.available_height() - 40.0).max(150.0);
                     egui::ScrollArea::vertical()
                         .max_height(sections_max_h)
@@ -1447,7 +1419,6 @@ impl eframe::App for GUIApp {
                         .show(ui, |ui| {
                     ui.set_width(ui.available_width());
 
-                    // --- general ---
                     frame.show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         ui.label(egui::RichText::new("General").weak().small());
@@ -1472,7 +1443,6 @@ impl eframe::App for GUIApp {
 
                     ui.add_space(4.0);
 
-                    // --- conflict resolution ---
                     frame.show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         ui.label(egui::RichText::new("Conflict Resolution").weak().small());
@@ -1497,7 +1467,6 @@ impl eframe::App for GUIApp {
 
                     ui.add_space(4.0);
 
-                    // --- backup location & naming ---
                     frame.show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         ui.label(egui::RichText::new("Backup Location & Naming").weak().small());
@@ -1597,9 +1566,8 @@ impl eframe::App for GUIApp {
                         }
                     });
 
-                    }); // end sections scroll area
+                    });
 
-                    // apply the default backup location change
                     let should_update = match &self.default_backup_location {
                         Some(p) => loc_str != p.display().to_string(),
                         None => !loc_str.is_empty(),
@@ -1635,8 +1603,8 @@ impl eframe::App for GUIApp {
 
                 }
             }
-            }); // end tab-body fade scope
+            });
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
-        }); // end margin frame
+        });
     }
 }

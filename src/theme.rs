@@ -4,23 +4,15 @@ use eframe::egui::{
     self, Color32, CornerRadius, CursorIcon, FontFamily, FontId, Stroke, TextStyle,
 };
 
-/// primary accent, used for the main action buttons, progress bars and selection
 pub const ACCENT: Color32 = Color32::from_rgb(60, 130, 220);
-/// accent when hovered / for the drop-zone highlight
 pub const ACCENT_HOVER: Color32 = Color32::from_rgb(84, 156, 240);
 
-/// app background — essentially black
 pub const BG: Color32 = Color32::from_gray(6);
-/// raised surfaces: cards, the tab-bar container
 pub const CARD: Color32 = Color32::from_gray(19);
-/// sunken surfaces: text fields, the status box, the drop zone
 pub const SUNKEN: Color32 = Color32::BLACK;
 
-/// installs the app style/visuals onto the egui context, call once at startup
 pub fn install(ctx: &egui::Context) {
     ctx.all_styles_mut(|style| {
-        // --- spacing: a touch more air between things (kept modest so the
-        // fixed-size Settings tab still fits without a scrollbar) ---
         let s = &mut style.spacing;
         s.item_spacing = egui::vec2(8.0, 4.0);
         s.button_padding = egui::vec2(9.0, 4.0);
@@ -28,21 +20,29 @@ pub fn install(ctx: &egui::Context) {
         s.indent = 16.0;
         s.menu_margin = egui::Margin::same(6);
 
-        // --- type scale: bump Small + Heading so section labels and titles
-        // read cleaner; Body stays 13 to keep the fixed-size layout intact ---
         style.text_styles = [
-            (TextStyle::Small, FontId::new(10.0, FontFamily::Proportional)),
+            (
+                TextStyle::Small,
+                FontId::new(10.0, FontFamily::Proportional),
+            ),
             (TextStyle::Body, FontId::new(13.0, FontFamily::Proportional)),
-            (TextStyle::Button, FontId::new(13.0, FontFamily::Proportional)),
-            (TextStyle::Heading, FontId::new(19.0, FontFamily::Proportional)),
-            (TextStyle::Monospace, FontId::new(12.0, FontFamily::Monospace)),
+            (
+                TextStyle::Button,
+                FontId::new(13.0, FontFamily::Proportional),
+            ),
+            (
+                TextStyle::Heading,
+                FontId::new(19.0, FontFamily::Proportional),
+            ),
+            (
+                TextStyle::Monospace,
+                FontId::new(12.0, FontFamily::Monospace),
+            ),
         ]
         .into();
 
-        // --- interaction: pointer cursor on clickables, like the web ---
         style.visuals.interact_cursor = Some(CursorIcon::PointingHand);
 
-        // --- visuals: black surfaces, rounder corners, accent-tinted selection ---
         let v = &mut style.visuals;
         v.window_corner_radius = CornerRadius::same(9);
         v.menu_corner_radius = CornerRadius::same(8);
@@ -61,7 +61,6 @@ pub fn install(ctx: &egui::Context) {
         v.warn_fg_color = Color32::from_rgb(240, 185, 70);
         v.error_fg_color = Color32::from_rgb(238, 102, 90);
 
-        // rounder widgets + hairline outlines that still read against black
         let w = &mut v.widgets;
         for wv in [
             &mut w.noninteractive,
@@ -83,13 +82,10 @@ pub fn install(ctx: &egui::Context) {
     });
 }
 
-/// a filled accent button that reads as the primary action on a screen
 pub fn primary_button(label: &str) -> egui::Button<'static> {
     egui::Button::new(egui::RichText::new(label.to_owned()).color(Color32::WHITE)).fill(ACCENT)
 }
 
-/// animated pill toggle + label, a drop-in modern replacement for `ui.checkbox`.
-/// the whole row is clickable and the knob slides between states.
 pub fn toggle(ui: &mut egui::Ui, on: &mut bool, label: &str) -> egui::Response {
     ui.horizontal(|ui| {
         let mut response = toggle_switch(ui, on);
@@ -103,7 +99,6 @@ pub fn toggle(ui: &mut egui::Ui, on: &mut bool, label: &str) -> egui::Response {
     .inner
 }
 
-/// the bare switch part of [`toggle`]
 fn toggle_switch(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
     let height = ui.spacing().interact_size.y.max(16.0) * 0.82;
     let size = egui::vec2(height * 1.85, height);
@@ -117,7 +112,6 @@ fn toggle_switch(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
     });
 
     if ui.is_rect_visible(rect) {
-        // 0.0 = off, 1.0 = on, eased over the last few frames
         let t = ui.ctx().animate_bool_responsive(response.id, *on);
         let radius = 0.5 * rect.height();
 
