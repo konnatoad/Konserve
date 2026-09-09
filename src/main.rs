@@ -159,7 +159,7 @@ fn main() -> Result<(), eframe::Error> {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([470.0, 602.0])
+            .with_inner_size([WINDOW_WIDTH, WINDOW_HEIGHT])
             .with_resizable(false)
             .with_icon(icon),
         ..Default::default()
@@ -181,10 +181,97 @@ fn main() -> Result<(), eframe::Error> {
     result
 }
 
-#[derive(PartialEq)]
+/// fixed window inner size; the Settings tab scrolls when its content is taller
+const WINDOW_WIDTH: f32 = 470.0;
+const WINDOW_HEIGHT: f32 = 600.0;
+
+#[derive(PartialEq, Clone, Copy)]
 enum MainTab {
     Home,
     Settings,
+}
+
+/// segmented tab switcher with an accent pill that slides to the active tab.
+/// returns true if the selection changed this frame.
+fn animated_tab_bar(ui: &mut egui::Ui, current: &mut MainTab) -> bool {
+    const TABS: [(&str, MainTab); 2] = [("Home", MainTab::Home), ("Settings", MainTab::Settings)];
+    let active_idx = TABS.iter().position(|(_, t)| t == current).unwrap_or(0);
+    let mut changed = false;
+
+    egui::Frame::new()
+        .fill(ui.visuals().faint_bg_color)
+        .corner_radius(8.0)
+        .inner_margin(egui::Margin::same(3))
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            let tab_size = egui::vec2(90.0, 24.0);
+            let slide = ui.ctx().animate_value_with_time(
+                egui::Id::new("konserve_tab_slide"),
+                active_idx as f32,
+                0.18,
+            );
+            let font = ui
+                .style()
+                .text_styles
+                .get(&egui::TextStyle::Button)
+                .cloned()
+                .unwrap_or(egui::FontId::proportional(13.0));
+
+            ui.horizontal(|ui| {
+                // reserve a slot so the sliding pill paints behind the labels
+                let pill = ui.painter().add(egui::Shape::Noop);
+                let mut first_rect: Option<egui::Rect> = None;
+                let mut step = 0.0_f32;
+
+                for (i, (label, tab)) in TABS.into_iter().enumerate() {
+                    let (rect, resp) = ui.allocate_exact_size(tab_size, egui::Sense::click());
+                    match i {
+                        0 => first_rect = Some(rect),
+                        _ => {
+                            if let Some(fr) = first_rect {
+                                step = rect.left() - fr.left();
+                            }
+                        }
+                    }
+                    if resp.clicked() && *current != tab {
+                        *current = tab;
+                        changed = true;
+                    }
+                    let selected = *current == tab;
+                    let color = if selected {
+                        ui.visuals().strong_text_color()
+                    } else if resp.hovered() {
+                        ui.visuals().text_color()
+                    } else {
+                        ui.visuals().weak_text_color()
+                    };
+                    ui.painter().text(
+                        rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        label,
+                        font.clone(),
+                        color,
+                    );
+                }
+
+                if let Some(fr) = first_rect {
+                    let pill_rect = egui::Rect::from_min_size(
+                        egui::pos2(fr.left() + slide * step, fr.top()),
+                        fr.size(),
+                    );
+                    ui.painter().set(
+                        pill,
+                        egui::epaint::RectShape::filled(
+                            pill_rect,
+                            6.0,
+                            theme::ACCENT.gamma_multiply(0.30),
+                        ),
+                    );
+                }
+            });
+        });
+
+    changed
 }
 
 /// all the app state: settings, selected paths, progress, active tab
@@ -454,26 +541,9 @@ impl eframe::App for GUIApp {
             .inner_margin(egui::Margin::symmetric(10, 6))
             .show(ui, |ui| {
             ui.add_space(4.0);
-            egui::Frame::new()
-                .fill(ui.visuals().faint_bg_color)
-                .corner_radius(8.0)
-                .inner_margin(egui::Margin::same(3))
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        for (label, tab) in [("Home", MainTab::Home), ("Settings", MainTab::Settings)] {
-                            let active = self.tab == tab;
-                            let text = if active {
-                                egui::RichText::new(label).strong()
-                            } else {
-                                egui::RichText::new(label)
-                            };
-                            if ui.selectable_label(active, text).clicked() {
-                                self.tab = tab;
-                                *self.status.lock().unwrap() = String::new();
-                            }
-                        }
-                    });
-                });
+            if animated_tab_bar(ui, &mut self.tab) {
+                *self.status.lock().unwrap() = String::new();
+            }
             ui.add_space(6.0);
 
             // overwrite confirm for fixed backup names
@@ -820,6 +890,14 @@ impl eframe::App for GUIApp {
                 return;
             }
 
+            // quick fade-in of the tab body when the selection changes
+            let tab_fade = ui.ctx().animate_bool_with_time(
+                egui::Id::new(("konserve_tab_fade", matches!(self.tab, MainTab::Settings))),
+                true,
+                0.11,
+            );
+            ui.scope(|ui| {
+            ui.set_opacity(0.3 + 0.7 * tab_fade);
             match self.tab {
                 MainTab::Home => {
                     // poll the detect-apps thread
@@ -1016,7 +1094,7 @@ impl eframe::App for GUIApp {
                     let fill_h = (ui.available_height() - self.footer_height).max(120.0);
 
                     let drop_zone = egui::Frame::new()
-                        .fill(egui::Color32::from_gray(22))
+                        .fill(theme::SUNKEN)
                         .stroke(stroke)
                         .corner_radius(6.0)
                         .inner_margin(egui::Margin::symmetric(8, 6))
@@ -1360,13 +1438,22 @@ impl eframe::App for GUIApp {
                         .map(|p| p.display().to_string())
                         .unwrap_or_default();
 
+                    // sections scroll if they outgrow the window (e.g. when the
+                    // conflict-resolution combo appears); Save stays pinned below
+                    let sections_max_h = (ui.available_height() - 40.0).max(150.0);
+                    egui::ScrollArea::vertical()
+                        .max_height(sections_max_h)
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+
                     // --- general ---
                     frame.show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         ui.label(egui::RichText::new("General").weak().small());
                         ui.add_space(2.0);
                         ui.horizontal(|ui| {
-                            let resp = ui.checkbox(&mut self.verbose_logging, "Verbose Logging");
+                            let resp = theme::toggle(ui, &mut self.verbose_logging, "Verbose Logging");
                             if resp.changed() {
                                 if self.verbose_logging { helpers::init_verbose_log(); }
                                 else { helpers::close_verbose_log(); }
@@ -1379,8 +1466,8 @@ impl eframe::App for GUIApp {
                                 let _ = std::process::Command::new("open").arg(&path).spawn();
                             }
                         });
-                        ui.checkbox(&mut self.automatic_updates, "Check for Updates on Startup (WIP)");
-                        ui.checkbox(&mut self.file_size_summary, "File Size Summary (WIP)");
+                        theme::toggle(ui, &mut self.automatic_updates, "Check for Updates on Startup (WIP)");
+                        theme::toggle(ui, &mut self.file_size_summary, "File Size Summary (WIP)");
                     });
 
                     ui.add_space(4.0);
@@ -1390,7 +1477,7 @@ impl eframe::App for GUIApp {
                         ui.set_width(ui.available_width());
                         ui.label(egui::RichText::new("Conflict Resolution").weak().small());
                         ui.add_space(2.0);
-                        ui.checkbox(&mut self.conflict_resolution_enabled, "Enable Conflict Resolution");
+                        theme::toggle(ui, &mut self.conflict_resolution_enabled, "Enable Conflict Resolution");
                         if self.conflict_resolution_enabled {
                             egui::ComboBox::from_id_salt("conflict_mode")
                                 .selected_text(match self.conflict_resolution_mode {
@@ -1416,9 +1503,9 @@ impl eframe::App for GUIApp {
                         ui.label(egui::RichText::new("Backup Location & Naming").weak().small());
                         ui.add_space(2.0);
 
-                        ui.checkbox(&mut self.save_to_exe_dir, "Save backups to exe directory");
-                        ui.checkbox(&mut self.save_template_exe_dir, "Save templates to exe directory");
-                        ui.checkbox(&mut self.load_templates_from_exe_dir, "Load templates from exe directory");
+                        theme::toggle(ui, &mut self.save_to_exe_dir, "Save backups to exe directory");
+                        theme::toggle(ui, &mut self.save_template_exe_dir, "Save templates to exe directory");
+                        theme::toggle(ui, &mut self.load_templates_from_exe_dir, "Load templates from exe directory");
                         ui.add_space(2.0);
 
                         ui.label("Default backup location:");
@@ -1510,6 +1597,8 @@ impl eframe::App for GUIApp {
                         }
                     });
 
+                    }); // end sections scroll area
+
                     // apply the default backup location change
                     let should_update = match &self.default_backup_location {
                         Some(p) => loc_str != p.display().to_string(),
@@ -1546,6 +1635,7 @@ impl eframe::App for GUIApp {
 
                 }
             }
+            }); // end tab-body fade scope
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
         }); // end margin frame
     }
