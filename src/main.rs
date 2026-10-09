@@ -4,6 +4,7 @@
 mod backup;
 mod helpers;
 mod restore;
+mod theme;
 
 use backup::backup_gui;
 use helpers::BackupNameMode;
@@ -101,16 +102,12 @@ enum PendingLock {
 }
 
 struct ClosedApp {
-    /// Some for a KNOWN_APPS entry (relaunchable), None for an ad-hoc process we killed by pid
     known_index: Option<usize>,
     name: String,
-    /// exe path to relaunch after backup, windows only, known apps only
     exe_path: Option<PathBuf>,
-    /// set for ad-hoc (non-KNOWN_APPS) processes, killed by pid instead of by name
     pid: Option<u32>,
 }
 
-/// backup job waiting on the app-conflict prompt
 struct PendingBackup {
     folders: Vec<PathBuf>,
     out_dir: PathBuf,
@@ -118,22 +115,17 @@ struct PendingBackup {
     detected: Vec<PendingLock>,
 }
 
-/// restore preview result: tree + archive path on success, error string on fail
 type RestoreMsg = Result<(FolderTreeNode, PathBuf), String>;
 
-/// paths back from a background file dialog
 type FileDialogMsg = Vec<PathBuf>;
 
-/// result from the background app-detection thread
 type DetectResult = (Vec<PendingLock>, Vec<PathBuf>, PathBuf, String);
 
-/// saved paths you can reload for later backups
 #[derive(Serialize, Deserialize)]
 struct BackupTemplate {
     paths: Vec<PathBuf>,
 }
 
-/// one node in the restore tree, either a file or a folder with kids
 #[derive(Default)]
 struct FolderTreeNode {
     children: HashMap<String, FolderTreeNode>,
@@ -158,7 +150,7 @@ fn main() -> Result<(), eframe::Error> {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([460.0, 600.0])
+            .with_inner_size([WINDOW_WIDTH, WINDOW_HEIGHT])
             .with_resizable(false)
             .with_icon(icon),
         ..Default::default()
@@ -167,7 +159,10 @@ fn main() -> Result<(), eframe::Error> {
     let result = eframe::run_native(
         "Konserve",
         options,
-        Box::new(|_cc| Ok(Box::new(GUIApp::default()))),
+        Box::new(|cc| {
+            theme::install(&cc.egui_ctx);
+            Ok(Box::new(GUIApp::default()))
+        }),
     );
 
     if let Err(ref e) = result {
@@ -177,10 +172,94 @@ fn main() -> Result<(), eframe::Error> {
     result
 }
 
-#[derive(PartialEq)]
+/// fixed window inner size; the Settings tab scrolls when its content is taller
+const WINDOW_WIDTH: f32 = 470.0;
+const WINDOW_HEIGHT: f32 = 600.0;
+
+#[derive(PartialEq, Clone, Copy)]
 enum MainTab {
     Home,
     Settings,
+}
+
+fn animated_tab_bar(ui: &mut egui::Ui, current: &mut MainTab) -> bool {
+    const TABS: [(&str, MainTab); 2] = [("Home", MainTab::Home), ("Settings", MainTab::Settings)];
+    let active_idx = TABS.iter().position(|(_, t)| t == current).unwrap_or(0);
+    let mut changed = false;
+
+    egui::Frame::new()
+        .fill(ui.visuals().faint_bg_color)
+        .corner_radius(8.0)
+        .inner_margin(egui::Margin::same(3))
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            let tab_size = egui::vec2(90.0, 24.0);
+            let slide = ui.ctx().animate_value_with_time(
+                egui::Id::new("konserve_tab_slide"),
+                active_idx as f32,
+                0.18,
+            );
+            let font = ui
+                .style()
+                .text_styles
+                .get(&egui::TextStyle::Button)
+                .cloned()
+                .unwrap_or(egui::FontId::proportional(13.0));
+
+            ui.horizontal(|ui| {
+                let pill = ui.painter().add(egui::Shape::Noop);
+                let mut first_rect: Option<egui::Rect> = None;
+                let mut step = 0.0_f32;
+
+                for (i, (label, tab)) in TABS.into_iter().enumerate() {
+                    let (rect, resp) = ui.allocate_exact_size(tab_size, egui::Sense::click());
+                    match i {
+                        0 => first_rect = Some(rect),
+                        _ => {
+                            if let Some(fr) = first_rect {
+                                step = rect.left() - fr.left();
+                            }
+                        }
+                    }
+                    if resp.clicked() && *current != tab {
+                        *current = tab;
+                        changed = true;
+                    }
+                    let selected = *current == tab;
+                    let color = if selected {
+                        ui.visuals().strong_text_color()
+                    } else if resp.hovered() {
+                        ui.visuals().text_color()
+                    } else {
+                        ui.visuals().weak_text_color()
+                    };
+                    ui.painter().text(
+                        rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        label,
+                        font.clone(),
+                        color,
+                    );
+                }
+
+                if let Some(fr) = first_rect {
+                    let pill_rect = egui::Rect::from_min_size(
+                        egui::pos2(fr.left() + slide * step, fr.top()),
+                        fr.size(),
+                    );
+                    ui.painter().set(
+                        pill,
+                        egui::epaint::RectShape::filled(
+                            pill_rect,
+                            6.0,
+                            theme::ACCENT.gamma_multiply(0.30),
+                        ),
+                    );
+                }
+            });
+        });
+
+    changed
 }
 
 /// all the app state: settings, selected paths, progress, active tab
@@ -225,6 +304,9 @@ struct GUIApp {
     relaunch_rx: Option<mpsc::Receiver<Vec<ClosedApp>>>,
     config: helpers::KonserveConfig,
     drop_zone_rect: Option<egui::Rect>,
+    // last frame's measured height of the Home footer (buttons + progress + status),
+    // used to stretch the drop zone so it fills the window with no dead space
+    footer_height: f32,
 }
 
 impl Default for GUIApp {
@@ -271,6 +353,7 @@ impl Default for GUIApp {
             relaunch_rx: None,
             config,
             drop_zone_rect: None,
+            footer_height: 150.0,
         };
         if app.verbose_logging {
             helpers::init_verbose_log();
@@ -330,7 +413,6 @@ impl GUIApp {
                     continue;
                 }
                 if PROTECTED_PROCESSES.contains(&p.name.to_lowercase().as_str()) {
-                    // never offer to kill core OS processes; those files just get skipped later
                     continue;
                 }
                 detected.push(PendingLock::Unknown {
@@ -343,7 +425,6 @@ impl GUIApp {
         });
     }
 
-    /// kills apps, waits for them to exit, then starts the backup, all on a background thread
     fn start_backup_after_kill(
         &mut self,
         folders: Vec<PathBuf>,
@@ -381,9 +462,6 @@ impl GUIApp {
                 std::thread::sleep(std::time::Duration::from_millis(800));
 
                 set_status(&status, "Packing into .tar");
-                // skip_locked=true: we just did our best to close everything holding a lock,
-                // but a stray file we couldn't (or shouldn't, see PROTECTED_PROCESSES) close
-                // shouldn't abort the whole backup
                 match backup_gui(&folders, &out_dir, &filename, &progress, verbose, true) {
                     Ok(path) => {
                         set_status(&status, format!("✅ Backup created:\n{}", path.display()));
@@ -399,7 +477,6 @@ impl GUIApp {
             .expect("failed to spawn backup thread");
     }
 
-    /// spawns the backup thread, called once the app-conflict prompt is resolved
     fn start_backup(
         &mut self,
         folders: Vec<PathBuf>,
@@ -442,27 +519,15 @@ impl GUIApp {
 impl eframe::App for GUIApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         egui::Frame::new()
-            .inner_margin(egui::Margin::symmetric(8, 4))
+            .fill(ui.visuals().panel_fill)
+            .inner_margin(egui::Margin::symmetric(10, 6))
             .show(ui, |ui| {
             ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.add_space(4.0);
-                for (label, tab) in [("Home", MainTab::Home), ("Settings", MainTab::Settings)] {
-                    let active = self.tab == tab;
-                    let text = if active {
-                        egui::RichText::new(label).strong()
-                    } else {
-                        egui::RichText::new(label)
-                    };
-                    if ui.selectable_label(active, text).clicked() {
-                        self.tab = tab;
-                        *self.status.lock().unwrap() = String::new();
-                    }
-                }
-            });
-            ui.add_space(2.0);
+            if animated_tab_bar(ui, &mut self.tab) {
+                *self.status.lock().unwrap() = String::new();
+            }
+            ui.add_space(6.0);
 
-            // overwrite confirm for fixed backup names
             if let Some(ref dest) = self.overwrite_confirm.clone() {
                 ui.separator();
                 ui.colored_label(egui::Color32::YELLOW, format!("⚠ '{}' already exists. Overwrite?", dest.file_name().unwrap_or_default().to_string_lossy()));
@@ -510,7 +575,6 @@ impl eframe::App for GUIApp {
                 ui.separator();
             }
 
-            // app-conflict prompt
             if let Some(ref pending) = self.pending_backup {
                 ui.separator();
                 ui.colored_label(egui::Color32::YELLOW, "⚠ The following apps may be locking files:");
@@ -806,9 +870,16 @@ impl eframe::App for GUIApp {
                 return;
             }
 
+            // quick fade-in of the tab body when the selection changes
+            let tab_fade = ui.ctx().animate_bool_with_time(
+                egui::Id::new(("konserve_tab_fade", matches!(self.tab, MainTab::Settings))),
+                true,
+                0.11,
+            );
+            ui.scope(|ui| {
+            ui.set_opacity(0.3 + 0.7 * tab_fade);
             match self.tab {
                 MainTab::Home => {
-                    // poll the detect-apps thread
                     if let Some((detected, folders, out_dir, filename)) =
                         self.detect_rx.as_ref().and_then(|rx| rx.try_recv().ok())
                     {
@@ -839,7 +910,6 @@ impl eframe::App for GUIApp {
                         }
                     }
 
-                    // handle the restore preview thread's result
                     if let Some(finished_msg) =
                         self.restore_rx.as_ref().and_then(|rx| rx.try_recv().ok())
                     {
@@ -902,7 +972,7 @@ impl eframe::App for GUIApp {
                     egui::Frame::new()
                         .fill(ui.visuals().faint_bg_color)
                         .corner_radius(6.0)
-                        .inner_margin(egui::Margin::symmetric(6, 4))
+                        .inner_margin(egui::Margin::symmetric(8, 6))
                         .show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         ui.horizontal(|ui| {
@@ -993,25 +1063,27 @@ impl eframe::App for GUIApp {
                         self.selected_folders.sort();
                         self.selected_folders.dedup();
                     }
-                    // selected paths card
+                    // selected paths card — stretches to fill the space above the footer
                     let stroke = if zone_hovering {
-                        egui::Stroke::new(2.0, egui::Color32::from_rgb(80, 160, 240))
+                        egui::Stroke::new(2.0, theme::ACCENT_HOVER)
                     } else {
                         ui.visuals().widgets.noninteractive.bg_stroke
                     };
+                    let fill_h = (ui.available_height() - self.footer_height).max(120.0);
 
                     let drop_zone = egui::Frame::new()
+                        .fill(theme::SUNKEN)
                         .stroke(stroke)
                         .corner_radius(6.0)
-                        .inner_margin(egui::Margin::symmetric(6, 4))
+                        .inner_margin(egui::Margin::symmetric(8, 6))
                         .show(ui, |ui| {
                             ui.set_width(ui.available_width());
+                            ui.set_min_height(fill_h - 12.0);
                             if self.selected_folders.is_empty() {
                                 ui.vertical_centered(|ui| {
-                                    ui.add_space(18.0);
-                                        ui.weak("No files or folders selected.");
-                                        ui.weak("Use Add Folders or Add Files above, or drag and drop here.");
-                                    ui.add_space(18.0);
+                                    ui.add_space(((fill_h - 48.0) / 2.0).max(12.0));
+                                    ui.weak("No files or folders selected.");
+                                    ui.weak("Use Add Folders or Add Files above, or drag and drop here.");
                                 });
                             } else {
                                 ui.horizontal(|ui| {
@@ -1025,7 +1097,7 @@ impl eframe::App for GUIApp {
                                 ui.separator();
                                 let mut to_remove = None;
                                 egui::ScrollArea::vertical()
-                                    .max_height(200.0)
+                                    .max_height((fill_h - 56.0).max(80.0))
                                     .show(ui, |ui| {
                                         ui.set_width(ui.available_width());
                                         for (i, path) in self.selected_folders.iter().enumerate() {
@@ -1048,11 +1120,12 @@ impl eframe::App for GUIApp {
 
                     self.drop_zone_rect = Some(drop_zone.response.rect);
 
+                    let footer_top = ui.min_rect().bottom();
+
                     ui.add_space(2.0);
 
                     ui.separator();
 
-                    // template + action buttons
                     ui.horizontal(|ui| {
                         ui.vertical(|ui| {
                             let btn_size = egui::vec2(110.0, 24.0);
@@ -1085,7 +1158,6 @@ impl eframe::App for GUIApp {
                                                     let msg = if skipped.is_empty() {
                                                         "✅ Template loaded".into()
                                                     } else {
-                                                        // tell them how many got skipped
                                                         format!(
                                                             "✅ Loaded with {} paths skipped",
                                                             skipped.len()
@@ -1147,8 +1219,7 @@ impl eframe::App for GUIApp {
                         });
                         ui.vertical(|ui| {
                             let btn_size = egui::vec2(115.0, 24.0);
-                            ui.add_sized(btn_size, egui::Button::new("Create Backup")
-                                .fill(egui::Color32::from_rgb(40, 100, 180)))
+                            ui.add_sized(btn_size, theme::primary_button("Create Backup"))
                                 .clicked()
                                 .then(|| {
                                     let folders = self.selected_folders.clone();
@@ -1245,7 +1316,8 @@ impl eframe::App for GUIApp {
                                 0..=100 => {
                                     ui.add(
                                         egui::ProgressBar::new((p.get() as f32) / 100.0)
-                                            .fill(egui::Color32::from_rgb(80, 160, 240))
+                                            .fill(theme::ACCENT)
+                                            .corner_radius(3.0)
                                             .desired_height(6.0)
                                             .animate(true)
                                             .desired_width(ui.available_width()),
@@ -1270,13 +1342,15 @@ impl eframe::App for GUIApp {
                     ui.add_space(2.0);
                     egui::Frame::new()
                         .fill(ui.visuals().extreme_bg_color)
-                        .corner_radius(4.0)
-                        .inner_margin(egui::Margin::symmetric(8, 4))
+                        .corner_radius(6.0)
+                        .inner_margin(egui::Margin::symmetric(8, 6))
                         .show(ui, |ui| {
                             ui.set_width(ui.available_width());
                             let status_text = self.status.lock().unwrap_or_else(|e| e.into_inner()).clone();
                             ui.label(status_text.as_str());
                         });
+
+                    self.footer_height = (ui.min_rect().bottom() - footer_top).max(0.0);
                 }
 
                 MainTab::Settings => {
@@ -1288,7 +1362,7 @@ impl eframe::App for GUIApp {
                     });
                     ui.separator();
 
-                    let btn_size = egui::vec2(95.0, 17.0);
+                    let btn_size = egui::vec2(120.0, 24.0);
                     ui.add_sized(btn_size, egui::Button::new("Edit Template"))
                         .clicked()
                         .then(|| {
@@ -1338,13 +1412,19 @@ impl eframe::App for GUIApp {
                         .map(|p| p.display().to_string())
                         .unwrap_or_default();
 
-                    // --- general ---
+                    let sections_max_h = (ui.available_height() - 40.0).max(150.0);
+                    egui::ScrollArea::vertical()
+                        .max_height(sections_max_h)
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+
                     frame.show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         ui.label(egui::RichText::new("General").weak().small());
                         ui.add_space(2.0);
                         ui.horizontal(|ui| {
-                            let resp = ui.checkbox(&mut self.verbose_logging, "Verbose Logging");
+                            let resp = theme::toggle(ui, &mut self.verbose_logging, "Verbose Logging");
                             if resp.changed() {
                                 if self.verbose_logging { helpers::init_verbose_log(); }
                                 else { helpers::close_verbose_log(); }
@@ -1357,18 +1437,17 @@ impl eframe::App for GUIApp {
                                 let _ = std::process::Command::new("open").arg(&path).spawn();
                             }
                         });
-                        ui.checkbox(&mut self.automatic_updates, "Check for Updates on Startup (WIP)");
-                        ui.checkbox(&mut self.file_size_summary, "File Size Summary (WIP)");
+                        theme::toggle(ui, &mut self.automatic_updates, "Check for Updates on Startup (WIP)");
+                        theme::toggle(ui, &mut self.file_size_summary, "File Size Summary (WIP)");
                     });
 
                     ui.add_space(4.0);
 
-                    // --- conflict resolution ---
                     frame.show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         ui.label(egui::RichText::new("Conflict Resolution").weak().small());
                         ui.add_space(2.0);
-                        ui.checkbox(&mut self.conflict_resolution_enabled, "Enable Conflict Resolution");
+                        theme::toggle(ui, &mut self.conflict_resolution_enabled, "Enable Conflict Resolution");
                         if self.conflict_resolution_enabled {
                             egui::ComboBox::from_id_salt("conflict_mode")
                                 .selected_text(match self.conflict_resolution_mode {
@@ -1388,15 +1467,14 @@ impl eframe::App for GUIApp {
 
                     ui.add_space(4.0);
 
-                    // --- backup location & naming ---
                     frame.show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         ui.label(egui::RichText::new("Backup Location & Naming").weak().small());
                         ui.add_space(2.0);
 
-                        ui.checkbox(&mut self.save_to_exe_dir, "Save backups to exe directory");
-                        ui.checkbox(&mut self.save_template_exe_dir, "Save templates to exe directory");
-                        ui.checkbox(&mut self.load_templates_from_exe_dir, "Load templates from exe directory");
+                        theme::toggle(ui, &mut self.save_to_exe_dir, "Save backups to exe directory");
+                        theme::toggle(ui, &mut self.save_template_exe_dir, "Save templates to exe directory");
+                        theme::toggle(ui, &mut self.load_templates_from_exe_dir, "Load templates from exe directory");
                         ui.add_space(2.0);
 
                         ui.label("Default backup location:");
@@ -1488,7 +1566,8 @@ impl eframe::App for GUIApp {
                         }
                     });
 
-                    // apply the default backup location change
+                    });
+
                     let should_update = match &self.default_backup_location {
                         Some(p) => loc_str != p.display().to_string(),
                         None => !loc_str.is_empty(),
@@ -1503,8 +1582,7 @@ impl eframe::App for GUIApp {
                     ui.add_space(4.0);
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                        if ui.add(egui::Button::new("  Save  ")
-                            .fill(egui::Color32::from_rgb(40, 100, 180)))
+                        if ui.add_sized([96.0, 26.0], theme::primary_button("Save"))
                             .clicked()
                         {
                             self.config.verbose_logging = self.verbose_logging;
@@ -1525,7 +1603,8 @@ impl eframe::App for GUIApp {
 
                 }
             }
+            });
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
-        }); // end margin frame
+        });
     }
 }
