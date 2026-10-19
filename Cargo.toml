@@ -7,7 +7,7 @@ build = "build.rs"
 [dependencies]
 chrono = "0.4.45"
 dirs = "7.0.0"
-eframe = "0.36.1"
+eframe = "0.37.0"
 dotenv = "0.15.0"
 png = "0.18.1"
 rfd = "0.17.2"
