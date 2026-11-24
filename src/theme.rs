@@ -107,9 +107,8 @@ fn toggle_switch(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
         *on = !*on;
         response.mark_changed();
     }
-    response.widget_info(|| {
-        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, ui.is_enabled(), *on, "")
-    });
+    response
+        .widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, ui.is_enabled(), *on, ""));
 
     if ui.is_rect_visible(rect) {
         let t = ui.ctx().animate_bool_responsive(response.id, *on);
