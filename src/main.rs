@@ -195,7 +195,7 @@ fn animated_tab_bar(ui: &mut egui::Ui, current: &mut MainTab) -> bool {
             ui.spacing_mut().item_spacing.x = 0.0;
             let tab_size = egui::vec2(90.0, 24.0);
             let slide = ui.ctx().animate_value_with_time(
-                egui::Id::new("konserve_tab_slide"),
+                egui::Id::unique("konserve_tab_slide"),
                 active_idx as f32,
                 0.18,
             );
@@ -872,7 +872,7 @@ impl eframe::App for GUIApp {
 
             // quick fade-in of the tab body when the selection changes
             let tab_fade = ui.ctx().animate_bool_with_time(
-                egui::Id::new(("konserve_tab_fade", matches!(self.tab, MainTab::Settings))),
+                egui::Id::unique(("konserve_tab_fade", matches!(self.tab, MainTab::Settings))),
                 true,
                 0.11,
             );
